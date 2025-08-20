@@ -2,7 +2,9 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from google import genai
-from mara_secrets import GEMINI_API_KEY
+import os
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 """
 in: question on relationship (model) of several variables. A proposed model from these variables would constitute a hypothesis.
