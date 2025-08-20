@@ -2,4 +2,3 @@ fastapi
 uvicorn
 google-genai
 pydantic
-mara_secrets
