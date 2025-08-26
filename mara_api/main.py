@@ -1,4 +1,3 @@
-import time
 from fastapi import FastAPI
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,22 +6,27 @@ import os
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
+"""
+in: question on relationship (model) of several variables. A proposed model from these variables would constitute a hypothesis.
+out: analysis on that relationship, which would prove/disprove the veracity of a given hypothesis
+"""
+
 client = genai.Client(api_key=GEMINI_API_KEY)
 gemini_model = "gemini-2.5-pro"
 common_persona_prompt = "You are a senior data analyst with a specialty in meta-analysis."
 
 app = FastAPI()
 
-# --- CORS setup ---
+# --- Updated CORS setup ---
 origins = [
-    "https://aaronhanto-nyozw.com",
-    "https://aaronhanto-nyozw.wpcomstaging.com",
-    "http://localhost:3000",
+    "https://aaronhanto-nyozw.com",           # live site
+    "https://aaronhanto-nyozw.wpcomstaging.com",  # staging
+    "http://localhost:3000",                  # local dev
 ]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=origins,     # restrict to known frontends
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -32,83 +36,35 @@ app.add_middleware(
 class Query(BaseModel):
     message: str
 
-# --- Helper: fully defensive Gemini text extractor ---
-def extract_gemini_text(response):
-    if not response:
-        return ""
-    
-    candidates = getattr(response, "candidates", [])
-    if not candidates:
-        return ""
-    
-    texts = []
-    
-    for candidate in candidates:
-        content = getattr(candidate, "content", None)
-        if not content:
-            continue
-        
-        # 1) Direct text property
-        if hasattr(content, "text") and content.text:
-            texts.append(content.text)
-        
-        # 2) Parts list
-        parts = getattr(content, "parts", None)
-        if parts:
-            for part in parts:
-                part_text = getattr(part, "text", "")
-                if part_text:
-                    texts.append(part_text)
-    
-    # Join all collected texts, fallback to empty string
-    return "\n".join(texts) if texts else ""
-
-# --- Helper: simple call to Gemini (no retries) ---
-def call_gemini(contents):
-    try:
-        response = client.models.generate_content(model=gemini_model, contents=contents)
-        text = extract_gemini_text(response)
-        return text or ""
-    except Exception as e:
-        print("Gemini API error:", e)
-        return ""
-
-# --- API endpoint with array of messages ---
+# --- API endpoint ---
 @app.post("/chat")
 def chat_api(query: Query):
     user_query = query.message
-    print("Starting an investigation into:", user_query)
-
-    messages = []  # Do NOT include welcome message here
+    print("Starting an investigation into: " + user_query)
 
     try:
-        # Step 1
-        step1 = step_one(user_query)
-        messages.append({"role": "bot", "text": step1})
-
-        # Step 2
-        step2 = step_two(step1)
-        messages.append({"role": "bot", "text": step2})
-
-        # Step 3
-        step3 = step_three(step2)
-        messages.append({"role": "bot", "text": step3})
-
+        step_1_result = step_one(user_query)
+        step_2_result = step_two(step_1_result)
+        step_3_result = step_three(step_2_result)
+        reply = step_3_result
     except Exception as e:
         print("Gemini error:", e)
-        messages.append({"role": "bot", "text": "There was an error talking to Gemini."})
+        reply = "Sorry, there was an error talking to Gemini. Please try again later."
 
-    return {"messages": messages}
+    print("Goodbye from MARA!")
+    return {"reply": reply}
+
 
 # ------------------------
 # MARA Steps
 # ------------------------
 def step_one(user_query):
     step_1_query = compose_step_one_query(user_query)
-    print("Step 1: Finding relevant studies...")
-    step_1_response = call_gemini(step_1_query)
-    print("Step 1 result (first 500 chars):", step_1_response[:500], "...")
-    return step_1_response
+    step_1_response = client.models.generate_content(
+        model=gemini_model,
+        contents=step_1_query,
+    )
+    return step_1_response.text
 
 def compose_step_one_query(user_query):
     return (
@@ -127,10 +83,11 @@ def compose_step_one_query(user_query):
 
 def step_two(step_1_result):
     step_2_query = compose_step_two_query(step_1_result)
-    print("Step 2: Extracting study data...")
-    step_2_response = call_gemini(step_2_query)
-    print("Step 2 result (first 500 chars):", step_2_response[:500], "...")
-    return step_2_response
+    step_2_response = client.models.generate_content(
+        model=gemini_model,
+        contents=step_2_query,
+    )
+    return step_2_response.text
 
 def compose_step_two_query(step_1_result):
     return (
@@ -151,10 +108,11 @@ def compose_step_two_query(step_1_result):
 
 def step_three(step_2_result):
     step_3_query = compose_step_three_query(step_2_result)
-    print("Step 3: Analyzing study data...")
-    step_3_response = call_gemini(step_3_query)
-    print("Step 3 result (first 500 chars):", step_3_response[:500], "...")
-    return step_3_response
+    step_3_response = client.models.generate_content(
+        model=gemini_model,
+        contents=step_3_query,
+    )
+    return step_3_response.text
 
 def compose_step_three_query(step_2_result):
     return (
