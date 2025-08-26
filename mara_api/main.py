@@ -152,5 +152,10 @@ def compose_step_three_query(step_2_result):
 @app.get("/welcome")
 def welcome():
     return {
-        "message": "Hello! I can help analyze research studies. Ask me about relationships between variables."
+        "messages": [
+            {
+                "text": "Hello! Enter your question. This question should ask about the relationship of variables, such that a model capturing that relationship would constitute a hypothesis",
+                "role": "bot"
+            }
+        ]
     }
