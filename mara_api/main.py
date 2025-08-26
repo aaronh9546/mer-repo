@@ -63,12 +63,10 @@ def chat_api(query: Query):
         # Step 3
         step_results['step_3'] = step_three(step_results['step_2'])
 
-        # Final reply = step 3
-        step_results['final_reply'] = step_results['step_3']
-
     except Exception as e:
         print("Gemini error after retries:", e)
-        step_results['final_reply'] = "Sorry, there was an error talking to Gemini. Please try again later."
+        # Instead of 'final_reply', just return which steps succeeded
+        return {"error": "There was an error talking to Gemini. Some steps may be missing."}
 
     return step_results
 
