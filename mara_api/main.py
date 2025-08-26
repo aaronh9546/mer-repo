@@ -57,29 +57,32 @@ def call_gemini(contents):
         print("Gemini API error:", e)
         return ""
 
-# --- API endpoint with streaming-like JSON response ---
+# --- API endpoint with array of messages ---
 @app.post("/chat")
 def chat_api(query: Query):
     user_query = query.message
     print("Starting an investigation into:", user_query)
 
-    step_results = {}
+    messages = []
 
     try:
         # Step 1
-        step_results['step_1'] = step_one(user_query)
+        step1 = step_one(user_query)
+        messages.append({"role": "bot", "text": step1})
 
         # Step 2
-        step_results['step_2'] = step_two(step_results['step_1'])
+        step2 = step_two(step1)
+        messages.append({"role": "bot", "text": step2})
 
         # Step 3
-        step_results['step_3'] = step_three(step_results['step_2'])
+        step3 = step_three(step2)
+        messages.append({"role": "bot", "text": step3})
 
     except Exception as e:
         print("Gemini error:", e)
-        return {"error": "There was an error talking to Gemini. Some steps may be missing."}
+        messages.append({"role": "bot", "text": "There was an error talking to Gemini."})
 
-    return step_results
+    return {"messages": messages}
 
 # ------------------------
 # MARA Steps
@@ -151,3 +154,15 @@ def welcome():
     return {
         "message": "Hello! I can help analyze research studies. Ask me about relationships between variables."
     }
+✅ Now the API returns:
+
+json
+Copy
+Edit
+{
+  "messages": [
+    { "role": "bot", "text": "<step_1 content>" },
+    { "role": "bot", "text": "<step_2 content>" },
+    { "role": "bot", "text": "<step_3 content>" }
+  ]
+}
