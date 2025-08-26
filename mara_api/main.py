@@ -36,16 +36,27 @@ class Query(BaseModel):
 def extract_gemini_text(response):
     if not response:
         return ""
+    
     candidates = getattr(response, "candidates", [])
     if not candidates:
         return ""
+    
     candidate = candidates[0]
-    if hasattr(candidate.content, "text") and candidate.content.text:
-        return candidate.content.text
-    elif hasattr(candidate.content, "parts") and candidate.content.parts:
-        return "".join(p.text for p in candidate.content.parts if hasattr(p, "text"))
-    else:
-        return str(candidate.content)
+    content = getattr(candidate, "content", None)
+    if not content:
+        return ""
+    
+    # 1) Direct text property
+    if hasattr(content, "text") and content.text:
+        return content.text
+    
+    # 2) Parts list (some Gemini responses use 'parts')
+    parts = getattr(content, "parts", None)
+    if parts:
+        return "".join(getattr(p, "text", "") for p in parts)
+    
+    # 3) Fallback: stringify whatever is in content
+    return str(content)
 
 # --- Helper: simple call to Gemini (no retries) ---
 def call_gemini(contents):
@@ -147,4 +158,3 @@ def compose_step_three_query(step_2_result):
         + step_2_result
         + "\ncreate a simple model with only the impact of the main predictor of interest. Specifically, use a multivariate meta-regression model to conduct the meta-analysis."
     )
-
