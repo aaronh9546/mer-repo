@@ -42,12 +42,17 @@ def chat_api(query: Query):
     user_query = query.message
     print("Starting an investigation into: " + user_query)
 
-    step_1_result = step_one(user_query)
-    step_2_result = step_two(step_1_result)
-    step_3_result = step_three(step_2_result)
+    try:
+        step_1_result = step_one(user_query)
+        step_2_result = step_two(step_1_result)
+        step_3_result = step_three(step_2_result)
+        reply = step_3_result
+    except Exception as e:
+        print("Gemini error:", e)
+        reply = "Sorry, there was an error talking to Gemini. Please try again later."
 
     print("Goodbye from MARA!")
-    return {"reply": step_3_result}
+    return {"reply": reply}
 
 
 # ------------------------
