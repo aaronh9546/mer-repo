@@ -1,3 +1,4 @@
+import time
 from fastapi import FastAPI
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
@@ -6,27 +7,22 @@ import os
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-"""
-in: question on relationship (model) of several variables. A proposed model from these variables would constitute a hypothesis.
-out: analysis on that relationship, which would prove/disprove the veracity of a given hypothesis
-"""
-
 client = genai.Client(api_key=GEMINI_API_KEY)
 gemini_model = "gemini-2.5-pro"
 common_persona_prompt = "You are a senior data analyst with a specialty in meta-analysis."
 
 app = FastAPI()
 
-# --- Updated CORS setup ---
+# --- CORS setup ---
 origins = [
-    "https://aaronhanto-nyozw.com",           # live site
-    "https://aaronhanto-nyozw.wpcomstaging.com",  # staging
-    "http://localhost:3000",                  # local dev
+    "https://aaronhanto-nyozw.com",
+    "https://aaronhanto-nyozw.wpcomstaging.com",
+    "http://localhost:3000",
 ]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,     # restrict to known frontends
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -36,35 +32,55 @@ app.add_middleware(
 class Query(BaseModel):
     message: str
 
-# --- API endpoint ---
+# --- Helper: retry wrapper (2 retries) ---
+def call_gemini_with_retry(contents, retries=2, delay=2):
+    for attempt in range(1, retries + 1):
+        try:
+            response = client.models.generate_content(model=gemini_model, contents=contents)
+            return response.text
+        except Exception as e:
+            print(f"Gemini attempt {attempt} failed:", e)
+            if attempt < retries:
+                time.sleep(delay)
+            else:
+                raise  # re-raise after last attempt
+
+# --- API endpoint with streaming-like JSON response ---
 @app.post("/chat")
 def chat_api(query: Query):
     user_query = query.message
-    print("Starting an investigation into: " + user_query)
+    print("Starting an investigation into:", user_query)
+
+    step_results = {}
 
     try:
-        step_1_result = step_one(user_query)
-        step_2_result = step_two(step_1_result)
-        step_3_result = step_three(step_2_result)
-        reply = step_3_result
+        # Step 1
+        step_results['step_1'] = step_one(user_query)
+
+        # Step 2
+        step_results['step_2'] = step_two(step_results['step_1'])
+
+        # Step 3
+        step_results['step_3'] = step_three(step_results['step_2'])
+
+        # Final reply = step 3
+        step_results['final_reply'] = step_results['step_3']
+
     except Exception as e:
-        print("Gemini error:", e)
-        reply = "Sorry, there was an error talking to Gemini. Please try again later."
+        print("Gemini error after retries:", e)
+        step_results['final_reply'] = "Sorry, there was an error talking to Gemini. Please try again later."
 
-    print("Goodbye from MARA!")
-    return {"reply": reply}
-
+    return step_results
 
 # ------------------------
-# MARA Steps
+# MARA Steps with retry + debug prints
 # ------------------------
 def step_one(user_query):
     step_1_query = compose_step_one_query(user_query)
-    step_1_response = client.models.generate_content(
-        model=gemini_model,
-        contents=step_1_query,
-    )
-    return step_1_response.text
+    print("Step 1: Finding relevant studies...")
+    step_1_response = call_gemini_with_retry(step_1_query)
+    print("Step 1 result (first 500 chars):", step_1_response[:500], "...")
+    return step_1_response
 
 def compose_step_one_query(user_query):
     return (
@@ -83,11 +99,10 @@ def compose_step_one_query(user_query):
 
 def step_two(step_1_result):
     step_2_query = compose_step_two_query(step_1_result)
-    step_2_response = client.models.generate_content(
-        model=gemini_model,
-        contents=step_2_query,
-    )
-    return step_2_response.text
+    print("Step 2: Extracting study data...")
+    step_2_response = call_gemini_with_retry(step_2_query)
+    print("Step 2 result (first 500 chars):", step_2_response[:500], "...")
+    return step_2_response
 
 def compose_step_two_query(step_1_result):
     return (
@@ -108,11 +123,10 @@ def compose_step_two_query(step_1_result):
 
 def step_three(step_2_result):
     step_3_query = compose_step_three_query(step_2_result)
-    step_3_response = client.models.generate_content(
-        model=gemini_model,
-        contents=step_3_query,
-    )
-    return step_3_response.text
+    print("Step 3: Analyzing study data...")
+    step_3_response = call_gemini_with_retry(step_3_query)
+    print("Step 3 result (first 500 chars):", step_3_response[:500], "...")
+    return step_3_response
 
 def compose_step_three_query(step_2_result):
     return (
