@@ -65,6 +65,16 @@ def chat_api(query: Query):
 
     messages = []
 
+    # Dynamic welcome message from backend
+    messages.append({
+        "role": "bot",
+        "text": (
+            "Hello! Enter your question. "
+            "This question should ask about the relationship of variables, "
+            "such that a model capturing that relationship would constitute a hypothesis."
+        )
+    })
+
     try:
         # Step 1
         step1 = step_one(user_query)
@@ -154,7 +164,11 @@ def welcome():
     return {
         "messages": [
             {
-                "text": "Hello! Enter your question. This question should ask about the relationship of variables, such that a model capturing that relationship would constitute a hypothesis",
+                "text": (
+                    "Hello! Enter your question. "
+                    "This question should ask about the relationship of variables, "
+                    "such that a model capturing that relationship would constitute a hypothesis."
+                ),
                 "role": "bot"
             }
         ]
