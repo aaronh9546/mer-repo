@@ -32,7 +32,7 @@ app.add_middleware(
 class Query(BaseModel):
     message: str
 
-# --- Helper: safely extract text from Gemini responses ---
+# --- Helper: fully defensive Gemini text extractor ---
 def extract_gemini_text(response):
     if not response:
         return ""
@@ -41,22 +41,27 @@ def extract_gemini_text(response):
     if not candidates:
         return ""
     
-    candidate = candidates[0]
-    content = getattr(candidate, "content", None)
-    if not content:
-        return ""
+    texts = []
     
-    # 1) Direct text property
-    if hasattr(content, "text") and content.text:
-        return content.text
+    for candidate in candidates:
+        content = getattr(candidate, "content", None)
+        if not content:
+            continue
+        
+        # 1) Direct text property
+        if hasattr(content, "text") and content.text:
+            texts.append(content.text)
+        
+        # 2) Parts list
+        parts = getattr(content, "parts", None)
+        if parts:
+            for part in parts:
+                part_text = getattr(part, "text", "")
+                if part_text:
+                    texts.append(part_text)
     
-    # 2) Parts list (some Gemini responses use 'parts')
-    parts = getattr(content, "parts", None)
-    if parts:
-        return "".join(getattr(p, "text", "") for p in parts)
-    
-    # 3) Fallback: stringify whatever is in content
-    return str(content)
+    # Join all collected texts, fallback to empty string
+    return "\n".join(texts) if texts else ""
 
 # --- Helper: simple call to Gemini (no retries) ---
 def call_gemini(contents):
