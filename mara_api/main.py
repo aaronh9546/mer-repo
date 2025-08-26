@@ -32,18 +32,37 @@ app.add_middleware(
 class Query(BaseModel):
     message: str
 
+# --- Helper: safely extract text from Gemini responses ---
+def extract_gemini_text(response):
+    if not response:
+        return ""
+    candidates = getattr(response, "candidates", [])
+    if not candidates:
+        return ""
+    candidate = candidates[0]
+    if hasattr(candidate.content, "text") and candidate.content.text:
+        return candidate.content.text
+    elif hasattr(candidate.content, "parts") and candidate.content.parts:
+        return "".join(p.text for p in candidate.content.parts if hasattr(p, "text"))
+    else:
+        return str(candidate.content)
+
 # --- Helper: retry wrapper (2 retries) ---
 def call_gemini_with_retry(contents, retries=2, delay=2):
     for attempt in range(1, retries + 1):
         try:
             response = client.models.generate_content(model=gemini_model, contents=contents)
-            return response.text
+            text = extract_gemini_text(response)
+            if text:
+                return text
+            else:
+                print(f"API returned empty response (attempt {attempt})")
         except Exception as e:
             print(f"Gemini attempt {attempt} failed:", e)
-            if attempt < retries:
-                time.sleep(delay)
-            else:
-                raise  # re-raise after last attempt
+        if attempt < retries:
+            time.sleep(delay)
+    print("Gemini error after retries: response was None or empty")
+    return ""  # prevent 'NoneType' errors
 
 # --- API endpoint with streaming-like JSON response ---
 @app.post("/chat")
