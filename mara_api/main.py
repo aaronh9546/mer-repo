@@ -152,3 +152,10 @@ def compose_step_three_query(step_2_result):
         + step_2_result
         + "\ncreate a simple model with only the impact of the main predictor of interest. Specifically, use a multivariate meta-regression model to conduct the meta-analysis."
     )
+
+    # --- Welcome endpoint for dynamic initial chat message ---
+@app.get("/welcome")
+def welcome():
+    return {
+        "message": "Hello! I can help analyze research studies. Ask me about relationships between variables."
+    }
