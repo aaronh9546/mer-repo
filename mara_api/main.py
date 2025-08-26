@@ -31,6 +31,22 @@ app.add_middleware(
 class Query(BaseModel):
     message: str
 
+
+# 🟢 Helper: safely extract Gemini text
+def extract_text(response):
+    """Safely extract text from a Gemini response object."""
+    if not response:
+        return None
+    # Try direct .text
+    if hasattr(response, "text") and response.text:
+        return response.text
+    # Fallback: dig into candidates
+    try:
+        return response.candidates[0].content.parts[0].text
+    except (AttributeError, IndexError, KeyError):
+        return None
+
+
 # --- API endpoint ---
 @app.post("/chat")
 def chat_api(query: Query):
@@ -64,14 +80,13 @@ def step_one(user_query: str) -> str:
         model=gemini_model,
         contents=step_1_query,
     )
-    text = getattr(step_1_response, "text", None)
+    text = extract_text(step_1_response)
     if not text:
-        raise ValueError("Step 1: No response from Gemini.")
+        raise ValueError(f"Step 1: No response from Gemini. Raw: {step_1_response}")
     return text
 
 
 def compose_step_one_query(user_query: str) -> str:
-    user_query = user_query or ""
     return (
         common_persona_prompt
         + " Find me high-quality studies that look into the question of: "
@@ -95,14 +110,13 @@ def step_two(step_1_result: str) -> str:
         model=gemini_model,
         contents=step_2_query,
     )
-    text = getattr(step_2_response, "text", None)
+    text = extract_text(step_2_response)
     if not text:
-        raise ValueError("Step 2: No response from Gemini.")
+        raise ValueError(f"Step 2: No response from Gemini. Raw: {step_2_response}")
     return text
 
 
 def compose_step_two_query(step_1_result: str) -> str:
-    step_1_result = step_1_result or ""
     return (
         common_persona_prompt
         + " First, Lookup the papers for each of the studies in this list."
@@ -128,14 +142,13 @@ def step_three(step_2_result: str) -> str:
         model=gemini_model,
         contents=step_3_query,
     )
-    text = getattr(step_3_response, "text", None)
+    text = extract_text(step_3_response)
     if not text:
-        raise ValueError("Step 3: No response from Gemini.")
+        raise ValueError(f"Step 3: No response from Gemini. Raw: {step_3_response}")
     return text
 
 
 def compose_step_three_query(step_2_result: str) -> str:
-    step_2_result = step_2_result or ""
     return (
         common_persona_prompt
         + "\nUsing this dataset: "
