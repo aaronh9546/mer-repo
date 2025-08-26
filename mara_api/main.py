@@ -47,22 +47,15 @@ def extract_gemini_text(response):
     else:
         return str(candidate.content)
 
-# --- Helper: retry wrapper (2 retries) ---
-def call_gemini_with_retry(contents, retries=2, delay=2):
-    for attempt in range(1, retries + 1):
-        try:
-            response = client.models.generate_content(model=gemini_model, contents=contents)
-            text = extract_gemini_text(response)
-            if text:
-                return text
-            else:
-                print(f"API returned empty response (attempt {attempt})")
-        except Exception as e:
-            print(f"Gemini attempt {attempt} failed:", e)
-        if attempt < retries:
-            time.sleep(delay)
-    print("Gemini error after retries: response was None or empty")
-    return ""  # prevent 'NoneType' errors
+# --- Helper: simple call to Gemini (no retries) ---
+def call_gemini(contents):
+    try:
+        response = client.models.generate_content(model=gemini_model, contents=contents)
+        text = extract_gemini_text(response)
+        return text or ""
+    except Exception as e:
+        print("Gemini API error:", e)
+        return ""
 
 # --- API endpoint with streaming-like JSON response ---
 @app.post("/chat")
@@ -83,19 +76,18 @@ def chat_api(query: Query):
         step_results['step_3'] = step_three(step_results['step_2'])
 
     except Exception as e:
-        print("Gemini error after retries:", e)
-        # Instead of 'final_reply', just return which steps succeeded
+        print("Gemini error:", e)
         return {"error": "There was an error talking to Gemini. Some steps may be missing."}
 
     return step_results
 
 # ------------------------
-# MARA Steps with retry + debug prints
+# MARA Steps
 # ------------------------
 def step_one(user_query):
     step_1_query = compose_step_one_query(user_query)
     print("Step 1: Finding relevant studies...")
-    step_1_response = call_gemini_with_retry(step_1_query)
+    step_1_response = call_gemini(step_1_query)
     print("Step 1 result (first 500 chars):", step_1_response[:500], "...")
     return step_1_response
 
@@ -117,7 +109,7 @@ def compose_step_one_query(user_query):
 def step_two(step_1_result):
     step_2_query = compose_step_two_query(step_1_result)
     print("Step 2: Extracting study data...")
-    step_2_response = call_gemini_with_retry(step_2_query)
+    step_2_response = call_gemini(step_2_query)
     print("Step 2 result (first 500 chars):", step_2_response[:500], "...")
     return step_2_response
 
@@ -141,7 +133,7 @@ def compose_step_two_query(step_1_result):
 def step_three(step_2_result):
     step_3_query = compose_step_three_query(step_2_result)
     print("Step 3: Analyzing study data...")
-    step_3_response = call_gemini_with_retry(step_3_query)
+    step_3_response = call_gemini(step_3_query)
     print("Step 3 result (first 500 chars):", step_3_response[:500], "...")
     return step_3_response
 
@@ -153,7 +145,7 @@ def compose_step_three_query(step_2_result):
         + "\ncreate a simple model with only the impact of the main predictor of interest. Specifically, use a multivariate meta-regression model to conduct the meta-analysis."
     )
 
-    # --- Welcome endpoint for dynamic initial chat message ---
+# --- Welcome endpoint for dynamic initial chat message ---
 @app.get("/welcome")
 def welcome():
     return {
