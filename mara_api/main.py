@@ -63,17 +63,7 @@ def chat_api(query: Query):
     user_query = query.message
     print("Starting an investigation into:", user_query)
 
-    messages = []
-
-    # Dynamic welcome message from backend
-    messages.append({
-        "role": "bot",
-        "text": (
-            "Hello! Enter your question. "
-            "This question should ask about the relationship of variables, "
-            "such that a model capturing that relationship would constitute a hypothesis."
-        )
-    })
+    messages = []  # Do NOT include welcome message here
 
     try:
         # Step 1
