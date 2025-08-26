@@ -154,15 +154,3 @@ def welcome():
     return {
         "message": "Hello! I can help analyze research studies. Ask me about relationships between variables."
     }
-✅ Now the API returns:
-
-json
-Copy
-Edit
-{
-  "messages": [
-    { "role": "bot", "text": "<step_1 content>" },
-    { "role": "bot", "text": "<step_2 content>" },
-    { "role": "bot", "text": "<step_3 content>" }
-  ]
-}
