@@ -17,22 +17,26 @@ common_persona_prompt = "You are a senior data analyst with a specialty in meta-
 
 app = FastAPI()
 
-# Update this to your WordPress domain
+# --- Updated CORS setup ---
 origins = [
-    "https://aaronhanto-nyozw.wpcomstaging.com",
+    "https://aaronhanto-nyozw.com",           # live site
+    "https://aaronhanto-nyozw.wpcomstaging.com",  # staging
+    "http://localhost:3000",                  # local dev
 ]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=origins,     # restrict to known frontends
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# --- Schema ---
 class Query(BaseModel):
     message: str
 
+# --- API endpoint ---
 @app.post("/chat")
 def chat_api(query: Query):
     user_query = query.message
@@ -47,7 +51,7 @@ def chat_api(query: Query):
 
 
 # ------------------------
-# MARA Steps (keep all your comments)
+# MARA Steps
 # ------------------------
 def step_one(user_query):
     step_1_query = compose_step_one_query(user_query)
