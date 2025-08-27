@@ -37,14 +37,25 @@ def extract_text(response):
     """Safely extract text from a Gemini response object."""
     if not response:
         return None
-    # Try direct .text
+
+    # Debug: log the raw response
+    print("🔎 Gemini raw response:", response)
+
+    # Try direct .text if available
     if hasattr(response, "text") and response.text:
         return response.text
-    # Fallback: dig into candidates
+
+    # Try candidates
     try:
-        return response.candidates[0].content.parts[0].text
-    except (AttributeError, IndexError, KeyError):
-        return None
+        if hasattr(response, "candidates") and response.candidates:
+            candidate = response.candidates[0]
+            if hasattr(candidate, "content") and candidate.content.parts:
+                return candidate.content.parts[0].text
+    except Exception as e:
+        print("⚠️ extract_text error while parsing:", e)
+
+    # If nothing worked
+    return None
 
 
 # --- API endpoint ---
@@ -82,7 +93,7 @@ def step_one(user_query: str) -> str:
     )
     text = extract_text(step_1_response)
     if not text:
-        raise ValueError(f"Step 1: No response from Gemini. Raw: {step_1_response}")
+        raise ValueError(f"Step 1: No response from Gemini. Raw response: {step_1_response}")
     return text
 
 
@@ -112,7 +123,7 @@ def step_two(step_1_result: str) -> str:
     )
     text = extract_text(step_2_response)
     if not text:
-        raise ValueError(f"Step 2: No response from Gemini. Raw: {step_2_response}")
+        raise ValueError(f"Step 2: No response from Gemini. Raw response: {step_2_response}")
     return text
 
 
@@ -144,7 +155,7 @@ def step_three(step_2_result: str) -> str:
     )
     text = extract_text(step_3_response)
     if not text:
-        raise ValueError(f"Step 3: No response from Gemini. Raw: {step_3_response}")
+        raise ValueError(f"Step 3: No response from Gemini. Raw response: {step_3_response}")
     return text
 
 
