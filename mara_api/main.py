@@ -1,8 +1,8 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
-from google import genai
-from google.generativeai.types import GenerationConfig # Import GenerationConfig
+import google.generativeai as genai
+from google.generativeai.types import GenerationConfig
 import os
 import enum
 
