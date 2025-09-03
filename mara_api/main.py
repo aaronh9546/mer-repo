@@ -12,7 +12,7 @@ if not GEMINI_API_KEY:
     raise ValueError("GEMINI_API_KEY environment variable not set.")
 
 client = genai.Client(api_key=GEMINI_API_KEY)
-gemini_model = "gemini-2.5-pro-latest"  
+gemini_model = "gemini-2.5-pro"  
 common_persona_prompt = "You are a senior data analyst with a specialty in meta-analysis."
 
 app = FastAPI()
