@@ -15,6 +15,7 @@ app = FastAPI()
 # --- CORS setup ---
 origins = [
     "https://aaronhanto-nyozw.com",
+    "https://timothy-han.com",
     "https://aaronhanto-nyozw.wpcomstaging.com",
     "http://localhost:3000",
 ]
