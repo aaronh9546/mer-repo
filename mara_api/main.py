@@ -2,23 +2,25 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from google import genai
+from google.generativeai.types import GenerationConfig # Import GenerationConfig
 import os
 import enum
 
 # --- Environment and API Client Setup ---
-# It's good practice to load the API key from environment variables.
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
     raise ValueError("GEMINI_API_KEY environment variable not set.")
 
-client = genai.Client(api_key=GEMINI_API_KEY)
-gemini_model = "gemini-2.5-pro"  
+# CORRECTED: Use genai.configure and genai.GenerativeModel
+genai.configure(api_key=GEMINI_API_KEY)
+# Initialize the model once to be reused
+gemini_model = genai.GenerativeModel("gemini-1.5-pro-latest")
+
 common_persona_prompt = "You are a senior data analyst with a specialty in meta-analysis."
 
 app = FastAPI()
 
 # --- CORS Middleware ---
-# Allows your frontend application to communicate with this API.
 origins = [
     "https://timothy-han.com",
     "http://localhost:3000",
@@ -67,8 +69,8 @@ class AnalysisResponse(BaseModel):
 class FollowupQuery(BaseModel):
     """Schema for a follow-up question."""
     followup_message: str
-    step_2_data: str  # The data extracted from studies
-    step_3_analysis: str # The initial analysis summary
+    step_2_data: str
+    step_3_analysis: str
 
 # --- Helper Function ---
 
@@ -77,7 +79,6 @@ def extract_text(response) -> str | None:
     try:
         if response and hasattr(response, 'text'):
             return response.text
-        # Add more sophisticated extraction logic if needed for complex responses
     except Exception as e:
         print(f"⚠️ Error extracting text: {e}")
     return None
@@ -99,10 +100,7 @@ def read_root():
 
 @app.post("/chat", response_model=AnalysisResponse)
 def chat_api(query: Query):
-    """
-    Main endpoint to perform the three-step meta-analysis.
-    Receives a user query and returns a structured analysis.
-    """
+    """Main endpoint to perform the three-step meta-analysis."""
     user_query = query.message
     if not user_query:
         raise HTTPException(status_code=400, detail="Query message is required.")
@@ -110,15 +108,12 @@ def chat_api(query: Query):
     print(f"🚀 Starting investigation for: '{user_query}'")
 
     try:
-        # Step 1: Find relevant studies
         step_1_result = get_studies(user_query)
         print("✅ Step 1: Found relevant studies.")
 
-        # Step 2: Extract data from those studies
         step_2_result = extract_studies_data(step_1_result)
         print("✅ Step 2: Extracted data from studies.")
 
-        # Step 3: Analyze the data and return a structured JSON response
         step_3_result = analyze_studies(step_2_result)
         print("✅ Step 3: Completed analysis.")
 
@@ -132,9 +127,7 @@ def chat_api(query: Query):
 
 @app.post("/followup")
 def followup_api(query: FollowupQuery):
-    """
-    Endpoint to handle follow-up questions based on the initial analysis.
-    """
+    """Endpoint to handle follow-up questions based on the initial analysis."""
     print("🔎 Handling a follow-up question...")
     try:
         prompt = (
@@ -143,10 +136,8 @@ def followup_api(query: FollowupQuery):
             f"Please answer the following follow-up question: '{query.followup_message}'"
         )
         
-        response = client.models.generate_content(
-            model=gemini_model,
-            contents=prompt,
-        )
+        # CORRECTED: Call generate_content on the model instance
+        response = gemini_model.generate_content(prompt)
         
         reply = extract_text(response)
         if not reply:
@@ -159,20 +150,18 @@ def followup_api(query: FollowupQuery):
         print(f"🔥 An error occurred during the follow-up: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to process follow-up: {e}")
 
-# ------------------------
-# MARA Core Logic Functions
-# ------------------------
-
 # --- Step 1: Get Studies ---
 def get_studies(user_query: str) -> str:
     prompt = compose_step_one_query(user_query)
-    response = client.models.generate_content(model=gemini_model, contents=prompt)
+    # CORRECTED: Call generate_content on the model instance
+    response = gemini_model.generate_content(prompt)
     text = extract_text(response)
     if not text:
         raise ValueError("Step 1: Failed to get a valid response from Gemini for finding studies.")
     return text
 
 def compose_step_one_query(user_query: str) -> str:
+    # This function is correct, no changes needed
     return (
         f"{common_persona_prompt} "
         f"Find me high-quality studies that look into the question of: {user_query}\n"
@@ -191,13 +180,15 @@ def compose_step_one_query(user_query: str) -> str:
 # --- Step 2: Extract Data ---
 def extract_studies_data(step_1_result: str) -> str:
     prompt = compose_step_two_query(step_1_result)
-    response = client.models.generate_content(model=gemini_model, contents=prompt)
+    # CORRECTED: Call generate_content on the model instance
+    response = gemini_model.generate_content(prompt)
     text = extract_text(response)
     if not text:
         raise ValueError("Step 2: Failed to get a valid response from Gemini for data extraction.")
     return text
 
 def compose_step_two_query(step_1_result: str) -> str:
+    # This function is correct, no changes needed
     return (
         f"{common_persona_prompt} "
         f"First, lookup the papers for each of the studies in this list:\n{step_1_result}\n"
@@ -215,19 +206,31 @@ def compose_step_two_query(step_1_result: str) -> str:
 # --- Step 3: Analyze Studies (with JSON output) ---
 def analyze_studies(step_2_result: str) -> AnalysisResponse:
     prompt = compose_step_three_query(step_2_result)
-    response = client.models.generate_content(
-        model=gemini_model,
-        contents=prompt,
-        generation_config={
-            "response_mime_type": "application/json",
-            "response_schema": AnalysisResponse,
-        },
+    
+    # THIS IS THE KEY FIX
+    # We create a GenerationConfig object and pass it to the 'generation_config' parameter.
+    config = GenerationConfig(
+        response_mime_type="application/json",
+        response_schema=AnalysisResponse,
     )
-    if not hasattr(response, 'parsed') or not response.parsed:
-        raise ValueError("Step 3: Failed to get a valid parsed JSON response from Gemini for analysis.")
-    return response.parsed
+    
+    # CORRECTED: Call generate_content on the model instance with the config object
+    response = gemini_model.generate_content(
+        prompt,
+        generation_config=config
+    )
+    
+    if not hasattr(response, 'text') or not response.text: # Check .text for JSON string
+        raise ValueError("Step 3: Failed to get a valid JSON response from Gemini for analysis.")
+    
+    # The SDK handles parsing when a schema is provided. Access it via response.text
+    # and Pydantic will validate it in the FastAPI response model.
+    # The .candidates[0].content.parts[0].text route is also valid.
+    return AnalysisResponse.parse_raw(response.text)
+
 
 def compose_step_three_query(step_2_result: str) -> str:
+    # This function is correct, no changes needed
     return (
         f"{common_persona_prompt}\n"
         f"Using this dataset:\n{step_2_result}\n"
