@@ -8,14 +8,30 @@ import os
 import enum
 import asyncio
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
-genai.configure(api_key=GEMINI_API_KEY)
-
-client = genai.GenerativeModel("gemini-1.5-pro-latest")
+# --- Client Initialization (UPDATED) ---
+# We will initialize the client during the FastAPI startup event
+client = None
 common_persona_prompt = "You are a senior data analyst with a specialty in meta-analysis."
 
 app = FastAPI()
+
+# NEW: Add a startup event to initialize the Gemini client
+@app.on_event("startup")
+async def startup_event():
+    """
+    Initializes the Gemini client when the application starts.
+    """
+    global client
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+    if not GEMINI_API_KEY:
+        # In a real app, you might want to handle this more gracefully
+        # But for deployment, crashing with a clear error is good.
+        raise ValueError("FATAL: GEMINI_API_KEY environment variable not set.")
+    
+    genai.configure(api_key=GEMINI_API_KEY)
+    client = genai.GenerativeModel("gemini-1.5-pro-latest")
+    print("✅ GenAI Client configured and initialized successfully.")
+
 
 # --- CORS setup ---
 origins = [
@@ -33,7 +49,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Schema (no changes) ---
+# --- Schema ---
 class Query(BaseModel):
     message: str
 
@@ -45,8 +61,9 @@ class Confidence(enum.Enum):
     @staticmethod
     def get_description():
         return (
-            "GREEN - If the research on the topic has a well-conducted, randomized study..."
-            # (rest of description is unchanged)
+            "GREEN - If the research on the topic has a well-conducted, randomized study showing a statistically significant positive effect on at least one outcome measure (e.g., state test or national standardized test) analyzed at the proper level of clustering (class/school or student) with a multi-site sample of at least 350 participants. Strong evidence from at least one well-designed and wellimplemented experimental study. Experimental studies were used to answer this question. Experimental studies are those in which students are randomly assigned to treatment or control groups, allowing researchers to speak with confidence about the likelihood that an intervention causes an outcome. Well-designed and well implemented experimental studies. The research studies use large (larger than 350 participants), multi-site samples. No other experimental or quasiexperimental research shows that the intervention negatively affects the outcome. Researchers have found that the intervention improves outcomes for the specific student subgroups that the district or school intends to support with the intervention."
+            + "\nYELLOW - If it meets all standards for “green” stated above, except that instead of using a randomized design, qualifying studies are prospective quasi-experiments (i.e., matched studies). Quasiexperimental studies (e.g., Regression Discontinuity Design) are those in which students have not been randomly assigned to treatment or control groups, but researchers are using statistical matching methods that allow them to speak with confidence about the likelihood that an intervention causes an outcome. The research studies use large, multi-site samples. No other experimental or quasiexperimental research shows that the intervention negatively affects the outcome. Researchers have found that the intervention improves outcomes for the specific student subgroups that the district or school intends to support with the intervention."
+            + "\nRED - The topic has a study that would have qualified for “green” or “yellow” but did not because it failed to account for clustering (but did obtain significantly positive outcomes at the student level) or did not meet the sample size requirements. Post-hoc or retrospective studies may also qualify. Correlational studies (e.g., studies that can show a relationship between the intervention and outcome but cannot show causation) have found that the intervention likely improves a relevant student outcome (e.g., reading scores, attendance rates). The studies do not have to be based on large, multi-site samples. No other experimental or quasiexperimental research shows that the intervention negatively affects the outcome."
         )
 
 class AnalysisDetails(BaseModel):
@@ -60,12 +77,18 @@ class AnalysisResponse(BaseModel):
     details: AnalysisDetails
 
 
-# --- API endpoint (no changes) ---
+# --- API endpoint ---
 @app.post("/chat")
 async def chat_api(query: Query):
     user_query = query.message
     
     async def event_generator():
+        # Add a check to ensure the client was initialized
+        if not client:
+            error_data = {"type": "error", "content": "Server error: AI client not initialized."}
+            yield f"data: {json.dumps(error_data)}\n\n"
+            return
+            
         try:
             # Step 1
             yield f"data: {json.dumps({'type': 'update', 'content': 'Finding relevant studies...'})}\n\n"
@@ -108,6 +131,7 @@ async def get_studies(user_query: str) -> str:
     if not response.text:
         raise ValueError("Step 1: No response from Gemini.")
     return response.text
+
 
 # UPDATED PROMPT
 def compose_step_one_query(user_query: str) -> str:
