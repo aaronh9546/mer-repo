@@ -1,33 +1,26 @@
+
+
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 import json
 from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
+# CORRECTED: This is the proper way to import the library
 import google.generativeai as genai
 import os
 import enum
 import asyncio
 
-# --- Client Initialization ---
-client = None
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+# Configure the library with your API key
+genai.configure(api_key=GEMINI_API_KEY)
+
+# Instantiate the model
+client = genai.GenerativeModel("gemini-1.5-pro-latest")
 common_persona_prompt = "You are a senior data analyst with a specialty in meta-analysis."
 
 app = FastAPI()
-
-@app.on_event("startup")
-async def startup_event():
-    """
-    Initializes the Gemini client when the application starts.
-    """
-    global client
-    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-    if not GEMINI_API_KEY:
-        raise ValueError("FATAL: GEMINI_API_KEY environment variable not set.")
-    
-    genai.configure(api_key=GEMINI_API_KEY)
-    client = genai.GenerativeModel("gemini-1.5-pro-latest")
-    print("✅ GenAI Client configured and initialized successfully.")
-
 
 # --- CORS setup ---
 origins = [
@@ -79,11 +72,6 @@ async def chat_api(query: Query):
     user_query = query.message
     
     async def event_generator():
-        if not client:
-            error_data = {"type": "error", "content": "Server error: AI client not initialized."}
-            yield f"data: {json.dumps(error_data)}\n\n"
-            return
-            
         try:
             # Step 1
             yield f"data: {json.dumps({'type': 'update', 'content': 'Finding relevant studies...'})}\n\n"
@@ -118,8 +106,11 @@ async def get_studies(user_query: str) -> str:
     if not user_query:
         raise ValueError("Step 1: user_query is empty.")
     step_1_query = compose_step_one_query(user_query)
+    
     response = await client.generate_content_async(step_1_query)
+    
     print(f"🔎 Step 1 Raw Response: {response}")
+
     if not response.text:
         raise ValueError("Step 1: No response from Gemini.")
     return response.text
@@ -138,15 +129,18 @@ def compose_step_one_query(user_query: str) -> str:
         + "\n2. are purely correlational, that do not include either a randomized-controlled trial, quasi-experimental design, or regression discontinuity"
         + "\nFinally, return these studies in a list of highest quality to lowest, formatting that list by: 'Title, Authors, Date Published.' "
         + "\nInclude at least 30 studies, or if fewer than 30 the max available."
-        + "\nIMPORTANT: Your entire response must ONLY be the raw list of studies. Do NOT include any preamble, postamble, notes, explanations, or any other conversational text."
+        + "\nKeep your response brief, only including that raw list and nothing more."
     )
 
 async def extract_studies_data(step_1_result: str) -> str:
     if not step_1_result:
         raise ValueError("Step 2: step_1_result is empty.")
     step_2_query = compose_step_two_query(step_1_result)
+
     response = await client.generate_content_async(step_2_query)
+    
     print(f"🔎 Step 2 Raw Response: {response}")
+
     if not response.text:
         raise ValueError("Step 2: No response from Gemini.")
     return response.text
@@ -166,9 +160,8 @@ def compose_step_two_query(step_1_result: str) -> str:
         + "\nAuthors can report this in varying ways. The preference is for adjusted effects, found in a linear regression. If adjusted effects are unavailable, raw means and standard deviations can be used."
         + "\n6. Study design (i.e., randomized controlled trial, quasi-experimental, or regression discontinuity)"
         + "\nReturn the results in a spreadsheet, where each row is for each study and each column is for each column feature in the above list."
-        + "\nIMPORTANT: Your entire response must ONLY be the raw spreadsheet data. Do NOT include any preamble, notes, explanations, or any other conversational text."
+        + "\nKeep your response brief, only including those spreadsheet rows and nothing more."
     )
-
 
 async def analyze_studies(step_2_result: str) -> AnalysisResponse:
     if not step_2_result:
@@ -182,28 +175,8 @@ async def analyze_studies(step_2_result: str) -> AnalysisResponse:
     
     print(f"🔎 Step 3 Raw Response: {response}")
 
-    try:
-        raw_dict = json.loads(response.text)
-        
-        # Sanitize top-level keys
-        sanitized_dict = {k.lower(): v for k, v in raw_dict.items()}
-        
-        # Sanitize and fix keys within the nested 'details' object
-        if 'details' in sanitized_dict and isinstance(sanitized_dict['details'], dict):
-            details_dict = sanitized_dict['details']
-            # First, lowercase all keys in the details dictionary
-            sanitized_details = {k.lower(): v for k, v in details_dict.items()}
-            # Second, manually map common AI mistakes to the correct key names
-            if 'analysis_process' in sanitized_details:
-                sanitized_details['process'] = sanitized_details.pop('analysis_process')
-            
-            sanitized_dict['details'] = sanitized_details
-
-        return AnalysisResponse(**sanitized_dict)
-    except (json.JSONDecodeError, TypeError) as e:
-        print(f"🔴 FAILED TO PARSE/VALIDATE JSON FROM GEMINI. Raw text was: {response.text}")
-        raise ValueError(f"Step 3 failed because the API did not return valid JSON. Error: {e}")
-
+    parsed_json = json.loads(response.text)
+    return AnalysisResponse(**parsed_json)
 
 def compose_step_three_query(step_2_result: str) -> str:
     return (
@@ -215,6 +188,5 @@ def compose_step_three_query(step_2_result: str) -> str:
         + Confidence.get_description()
         + "\nReturn this in the Confidence enum."
         + "\nGenerate an overview summarizing the analysis conclusion, in one or two sentences. Return this in the response Summary."
-        + "\nInclude all other details in the response Details, making sure to include a description of the analysis process used, the regression models produced, and any correpsonding plots."
-        + "\nIMPORTANT: Your entire response must ONLY be a raw JSON object. The top-level keys MUST be exactly `summary`, `confidence`, and `details` in all lowercase. The nested `details` object MUST contain exactly three keys: `regression_models`, `process`, and `plots`. Do not wrap the JSON in markdown or include any other text."
+        + "\nInclude all other details in the response Details, making sure to include a description of the analysis process used, the regression models produced, and any correpsonding plots, in the corresponding AnalysisDetails fields."
     )
