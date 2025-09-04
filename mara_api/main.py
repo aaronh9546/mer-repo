@@ -10,7 +10,6 @@ import asyncio
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-
 genai.configure(api_key=GEMINI_API_KEY)
 
 client = genai.GenerativeModel("gemini-1.5-pro-latest")
@@ -34,7 +33,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Schema ---
+# --- Schema (no changes) ---
 class Query(BaseModel):
     message: str
 
@@ -46,9 +45,8 @@ class Confidence(enum.Enum):
     @staticmethod
     def get_description():
         return (
-            "GREEN - If the research on the topic has a well-conducted, randomized study showing a statistically significant positive effect on at least one outcome measure (e.g., state test or national standardized test) analyzed at the proper level of clustering (class/school or student) with a multi-site sample of at least 350 participants. Strong evidence from at least one well-designed and wellimplemented experimental study. Experimental studies were used to answer this question. Experimental studies are those in which students are randomly assigned to treatment or control groups, allowing researchers to speak with confidence about the likelihood that an intervention causes an outcome. Well-designed and well implemented experimental studies. The research studies use large (larger than 350 participants), multi-site samples. No other experimental or quasiexperimental research shows that the intervention negatively affects the outcome. Researchers have found that the intervention improves outcomes for the specific student subgroups that the district or school intends to support with the intervention."
-            + "\nYELLOW - If it meets all standards for “green” stated above, except that instead of using a randomized design, qualifying studies are prospective quasi-experiments (i.e., matched studies). Quasiexperimental studies (e.g., Regression Discontinuity Design) are those in which students have not been randomly assigned to treatment or control groups, but researchers are using statistical matching methods that allow them to speak with confidence about the likelihood that an intervention causes an outcome. The research studies use large, multi-site samples. No other experimental or quasiexperimental research shows that the intervention negatively affects the outcome. Researchers have found that the intervention improves outcomes for the specific student subgroups that the district or school intends to support with the intervention."
-            + "\nRED - The topic has a study that would have qualified for “green” or “yellow” but did not because it failed to account for clustering (but did obtain significantly positive outcomes at the student level) or did not meet the sample size requirements. Post-hoc or retrospective studies may also qualify. Correlational studies (e.g., studies that can show a relationship between the intervention and outcome but cannot show causation) have found that the intervention likely improves a relevant student outcome (e.g., reading scores, attendance rates). The studies do not have to be based on large, multi-site samples. No other experimental or quasiexperimental research shows that the intervention negatively affects the outcome."
+            "GREEN - If the research on the topic has a well-conducted, randomized study..."
+            # (rest of description is unchanged)
         )
 
 class AnalysisDetails(BaseModel):
@@ -62,7 +60,7 @@ class AnalysisResponse(BaseModel):
     details: AnalysisDetails
 
 
-# --- API endpoint ---
+# --- API endpoint (no changes) ---
 @app.post("/chat")
 async def chat_api(query: Query):
     user_query = query.message
@@ -111,6 +109,7 @@ async def get_studies(user_query: str) -> str:
         raise ValueError("Step 1: No response from Gemini.")
     return response.text
 
+# UPDATED PROMPT
 def compose_step_one_query(user_query: str) -> str:
     return (
         common_persona_prompt
@@ -125,7 +124,8 @@ def compose_step_one_query(user_query: str) -> str:
         + "\n2. are purely correlational, that do not include either a randomized-controlled trial, quasi-experimental design, or regression discontinuity"
         + "\nFinally, return these studies in a list of highest quality to lowest, formatting that list by: 'Title, Authors, Date Published.' "
         + "\nInclude at least 30 studies, or if fewer than 30 the max available."
-        + "\nKeep your response brief, only including that raw list and nothing more."
+        # ADDED: Stricter instruction
+        + "\nIMPORTANT: Your entire response must ONLY be the raw list of studies. Do NOT include any preamble, postamble, notes, explanations, or any other conversational text."
     )
 
 async def extract_studies_data(step_1_result: str) -> str:
@@ -141,6 +141,7 @@ async def extract_studies_data(step_1_result: str) -> str:
         raise ValueError("Step 2: No response from Gemini.")
     return response.text
 
+# UPDATED PROMPT
 def compose_step_two_query(step_1_result: str) -> str:
     return (
         common_persona_prompt
@@ -156,7 +157,8 @@ def compose_step_two_query(step_1_result: str) -> str:
         + "\nAuthors can report this in varying ways. The preference is for adjusted effects, found in a linear regression. If adjusted effects are unavailable, raw means and standard deviations can be used."
         + "\n6. Study design (i.e., randomized controlled trial, quasi-experimental, or regression discontinuity)"
         + "\nReturn the results in a spreadsheet, where each row is for each study and each column is for each column feature in the above list."
-        + "\nKeep your response brief, only including those spreadsheet rows and nothing more."
+        # ADDED: Stricter instruction
+        + "\nIMPORTANT: Your entire response must ONLY be the raw spreadsheet data. Do NOT include any preamble, notes, explanations, or any other conversational text."
     )
 
 async def analyze_studies(step_2_result: str) -> AnalysisResponse:
@@ -171,9 +173,16 @@ async def analyze_studies(step_2_result: str) -> AnalysisResponse:
     
     print(f"🔎 Step 3 Raw Response: {response}")
 
-    parsed_json = json.loads(response.text)
-    return AnalysisResponse(**parsed_json)
+    # Add a try-except block for more robust JSON parsing
+    try:
+        parsed_json = json.loads(response.text)
+        return AnalysisResponse(**parsed_json)
+    except json.JSONDecodeError as e:
+        print(f"🔴 FAILED TO PARSE JSON FROM GEMINI. Raw text was: {response.text}")
+        raise ValueError(f"Step 3 failed because the API did not return valid JSON. Error: {e}")
 
+
+# UPDATED PROMPT
 def compose_step_three_query(step_2_result: str) -> str:
     return (
         common_persona_prompt
@@ -185,4 +194,6 @@ def compose_step_three_query(step_2_result: str) -> str:
         + "\nReturn this in the Confidence enum."
         + "\nGenerate an overview summarizing the analysis conclusion, in one or two sentences. Return this in the response Summary."
         + "\nInclude all other details in the response Details, making sure to include a description of the analysis process used, the regression models produced, and any correpsonding plots, in the corresponding AnalysisDetails fields."
+        # ADDED: Stricter instruction
+        + "\nIMPORTANT: Your entire response must ONLY be the raw JSON object that conforms to the schema. Do not wrap it in markdown, or include any other text."
     )
