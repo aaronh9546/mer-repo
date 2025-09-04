@@ -3,15 +3,17 @@ from fastapi.responses import StreamingResponse
 import json
 from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
-from google import genai
+import google.generativeai as genai
 import os
 import enum
 import asyncio
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# Use the async-compatible GenerativeModel client
-client = genai.GenerativeModel(model_name="gemini-1.5-pro-latest", api_key=GEMINI_API_KEY)
+
+genai.configure(api_key=GEMINI_API_KEY)
+
+client = genai.GenerativeModel("gemini-1.5-pro-latest")
 common_persona_prompt = "You are a senior data analyst with a specialty in meta-analysis."
 
 app = FastAPI()
@@ -103,7 +105,6 @@ async def get_studies(user_query: str) -> str:
     
     response = await client.generate_content_async(step_1_query)
     
-    # ADDED: Log raw response
     print(f"🔎 Step 1 Raw Response: {response}")
 
     if not response.text:
@@ -134,7 +135,6 @@ async def extract_studies_data(step_1_result: str) -> str:
 
     response = await client.generate_content_async(step_2_query)
     
-    # ADDED: Log raw response
     print(f"🔎 Step 2 Raw Response: {response}")
 
     if not response.text:
@@ -169,7 +169,6 @@ async def analyze_studies(step_2_result: str) -> AnalysisResponse:
         generation_config={"response_mime_type": "application/json"},
     )
     
-    # ADDED: Log raw response
     print(f"🔎 Step 3 Raw Response: {response}")
 
     parsed_json = json.loads(response.text)
