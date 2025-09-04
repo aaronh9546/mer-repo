@@ -56,9 +56,10 @@ class Confidence(str, enum.Enum):
         )
 class AnalysisDetails(BaseModel):
     """Schema for the detailed components of the analysis."""
-    regression_models: Optional[str] = None
-    process: Optional[str] = None
-    plots: Optional[str] = None
+    # We are only declaring them as Optional, without "= None"
+    regression_models: Optional[str]
+    process: Optional[str]
+    plots: Optional[str]
 
 class AnalysisResponse(BaseModel):
     """Schema for the final, structured analysis from Step 3."""
