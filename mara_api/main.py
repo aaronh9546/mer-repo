@@ -1,5 +1,3 @@
-
-
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 import json
@@ -129,7 +127,8 @@ def compose_step_one_query(user_query: str) -> str:
         + "\n2. are purely correlational, that do not include either a randomized-controlled trial, quasi-experimental design, or regression discontinuity"
         + "\nFinally, return these studies in a list of highest quality to lowest, formatting that list by: 'Title, Authors, Date Published.' "
         + "\nInclude at least 30 studies, or if fewer than 30 the max available."
-        + "\nKeep your response brief, only including that raw list and nothing more."
+        # ADDED: Stricter instruction to prevent conversational text
+        + "\nIMPORTANT: Your entire response must ONLY be the raw list of studies. Do NOT include any preamble, postamble, notes, explanations, or any other conversational text."
     )
 
 async def extract_studies_data(step_1_result: str) -> str:
@@ -160,9 +159,11 @@ def compose_step_two_query(step_1_result: str) -> str:
         + "\nAuthors can report this in varying ways. The preference is for adjusted effects, found in a linear regression. If adjusted effects are unavailable, raw means and standard deviations can be used."
         + "\n6. Study design (i.e., randomized controlled trial, quasi-experimental, or regression discontinuity)"
         + "\nReturn the results in a spreadsheet, where each row is for each study and each column is for each column feature in the above list."
-        + "\nKeep your response brief, only including those spreadsheet rows and nothing more."
+        # ADDED: Stricter instruction to prevent conversational text
+        + "\nIMPORTANT: Your entire response must ONLY be the raw spreadsheet data. Do NOT include any preamble, notes, explanations, or any other conversational text."
     )
 
+# UPDATED FUNCTION
 async def analyze_studies(step_2_result: str) -> AnalysisResponse:
     if not step_2_result:
         raise ValueError("Step 3: step_2_result is empty.")
@@ -175,9 +176,26 @@ async def analyze_studies(step_2_result: str) -> AnalysisResponse:
     
     print(f"🔎 Step 3 Raw Response: {response}")
 
-    parsed_json = json.loads(response.text)
-    return AnalysisResponse(**parsed_json)
+    try:
+        raw_dict = json.loads(response.text)
+        
+        # ADDED SAFEGUARD: Convert all keys to lowercase before validation.
+        sanitized_dict = {k.lower(): v for k, v in raw_dict.items()}
+        
+        # ADDED SAFEGUARD for nested 'details' object
+        if 'details' in sanitized_dict and isinstance(sanitized_dict['details'], dict):
+            details_dict = sanitized_dict['details']
+            sanitized_details = {k.lower(): v for k, v in details_dict.items()}
+            if 'analysis_process' in sanitized_details:
+                sanitized_details['process'] = sanitized_details.pop('analysis_process')
+            sanitized_dict['details'] = sanitized_details
+            
+        return AnalysisResponse(**sanitized_dict)
+    except (json.JSONDecodeError, TypeError) as e:
+        print(f"🔴 FAILED TO PARSE/VALIDATE JSON FROM GEMINI. Raw text was: {response.text}")
+        raise ValueError(f"Step 3 failed because the API did not return valid JSON. Error: {e}")
 
+# UPDATED PROMPT
 def compose_step_three_query(step_2_result: str) -> str:
     return (
         common_persona_prompt
@@ -188,5 +206,7 @@ def compose_step_three_query(step_2_result: str) -> str:
         + Confidence.get_description()
         + "\nReturn this in the Confidence enum."
         + "\nGenerate an overview summarizing the analysis conclusion, in one or two sentences. Return this in the response Summary."
-        + "\nInclude all other details in the response Details, making sure to include a description of the analysis process used, the regression models produced, and any correpsonding plots, in the corresponding AnalysisDetails fields."
+        + "\nInclude all other details in the response Details, making sure to include a description of the analysis process used, the regression models produced, and any correpsonding plots."
+        # ADDED: Stricter instruction about JSON format and ALL keys
+        + "\nIMPORTANT: Your entire response must ONLY be a raw JSON object. The top-level keys MUST be exactly `summary`, `confidence`, and `details` in all lowercase. The nested `details` object MUST contain exactly three keys: `regression_models`, `process`, and `plots`. Do not wrap the JSON in markdown or include any other text."
     )
