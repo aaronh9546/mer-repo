@@ -54,8 +54,6 @@ class Confidence(str, enum.Enum):
             "\nYELLOW - If it meets all standards for “green” stated above, except that instead of using a randomized design, qualifying studies are prospective quasi-experiments (i.e., matched studies)..."
             "\nRED - The topic has a study that would have qualified for “green” or “yellow” but did not because it failed to account for clustering (but did obtain significantly positive outcomes at the student level) or did not meet the sample size requirements..."
         )
-
-class AnalysisDetails(BaseModel):
 class AnalysisDetails(BaseModel):
     """Schema for the detailed components of the analysis."""
     regression_models: Optional[str] = None
