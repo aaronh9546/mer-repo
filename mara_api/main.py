@@ -1,29 +1,32 @@
+
+
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from typing import Optional
+from fastapi.responses import StreamingResponse
+import json
+from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
+# CORRECTED: This is the proper way to import the library
 import google.generativeai as genai
-from google.generativeai.types import GenerationConfig
 import os
 import enum
+import asyncio
 
-# --- Environment and API Client Setup ---
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-if not GEMINI_API_KEY:
-    raise ValueError("GEMINI_API_KEY environment variable not set.")
 
-# CORRECTED: Use genai.configure and genai.GenerativeModel
+# Configure the library with your API key
 genai.configure(api_key=GEMINI_API_KEY)
-# Initialize the model once to be reused
-gemini_model = genai.GenerativeModel("gemini-1.5-pro-latest")
 
+# Instantiate the model
+client = genai.GenerativeModel("gemini-1.5-pro-latest")
 common_persona_prompt = "You are a senior data analyst with a specialty in meta-analysis."
 
 app = FastAPI()
 
-# --- CORS Middleware ---
+# --- CORS setup ---
 origins = [
+    "https://aaronhanto-nyozw.com",
     "https://timothy-han.com",
+    "https://aaronhanto-nyozw.wpcomstaging.com",
     "http://localhost:3000",
 ]
 
@@ -35,209 +38,155 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Pydantic Schemas (Data Models) ---
-
+# --- Schema ---
 class Query(BaseModel):
-    """Schema for the initial user query."""
     message: str
 
-class Confidence(str, enum.Enum):
-    """Enum for the confidence level of the analysis."""
+class Confidence(enum.Enum):
     GREEN = "GREEN"
     YELLOW = "YELLOW"
     RED = "RED"
-
+    
     @staticmethod
-    def get_description() -> str:
+    def get_description():
         return (
-            "GREEN - If the research on the topic has a well-conducted, randomized study showing a statistically significant positive effect on at least one outcome measure (e.g., state test or national standardized test) analyzed at the proper level of clustering (class/school or student) with a multi-site sample of at least 350 participants. Strong evidence from at least one well-designed and wellimplemented experimental study..."
-            "\nYELLOW - If it meets all standards for “green” stated above, except that instead of using a randomized design, qualifying studies are prospective quasi-experiments (i.e., matched studies)..."
-            "\nRED - The topic has a study that would have qualified for “green” or “yellow” but did not because it failed to account for clustering (but did obtain significantly positive outcomes at the student level) or did not meet the sample size requirements..."
+            "GREEN - If the research on the topic has a well-conducted, randomized study showing a statistically significant positive effect on at least one outcome measure (e.g., state test or national standardized test) analyzed at the proper level of clustering (class/school or student) with a multi-site sample of at least 350 participants. Strong evidence from at least one well-designed and wellimplemented experimental study. Experimental studies were used to answer this question. Experimental studies are those in which students are randomly assigned to treatment or control groups, allowing researchers to speak with confidence about the likelihood that an intervention causes an outcome. Well-designed and well implemented experimental studies. The research studies use large (larger than 350 participants), multi-site samples. No other experimental or quasiexperimental research shows that the intervention negatively affects the outcome. Researchers have found that the intervention improves outcomes for the specific student subgroups that the district or school intends to support with the intervention."
+            + "\nYELLOW - If it meets all standards for “green” stated above, except that instead of using a randomized design, qualifying studies are prospective quasi-experiments (i.e., matched studies). Quasiexperimental studies (e.g., Regression Discontinuity Design) are those in which students have not been randomly assigned to treatment or control groups, but researchers are using statistical matching methods that allow them to speak with confidence about the likelihood that an intervention causes an outcome. The research studies use large, multi-site samples. No other experimental or quasiexperimental research shows that the intervention negatively affects the outcome. Researchers have found that the intervention improves outcomes for the specific student subgroups that the district or school intends to support with the intervention."
+            + "\nRED - The topic has a study that would have qualified for “green” or “yellow” but did not because it failed to account for clustering (but did obtain significantly positive outcomes at the student level) or did not meet the sample size requirements. Post-hoc or retrospective studies may also qualify. Correlational studies (e.g., studies that can show a relationship between the intervention and outcome but cannot show causation) have found that the intervention likely improves a relevant student outcome (e.g., reading scores, attendance rates). The studies do not have to be based on large, multi-site samples. No other experimental or quasiexperimental research shows that the intervention negatively affects the outcome."
         )
+
 class AnalysisDetails(BaseModel):
-    """Schema for the detailed components of the analysis."""
-    # We are only declaring them as Optional, without "= None"
-    regression_models: Optional[str]
-    process: Optional[str]
-    plots: Optional[str]
+    regression_models: str
+    process: str
+    plots: str
 
 class AnalysisResponse(BaseModel):
-    """Schema for the final, structured analysis from Step 3."""
     summary: str
     confidence: Confidence
     details: AnalysisDetails
 
-class FollowupQuery(BaseModel):
-    """Schema for a follow-up question."""
-    followup_message: str
-    step_2_data: str
-    step_3_analysis: str
 
-# --- Helper Function ---
-
-def extract_text(response) -> str | None:
-    """Safely extract text from a Gemini response object for Steps 1 and 2."""
-    try:
-        if response and hasattr(response, 'text'):
-            return response.text
-    except Exception as e:
-        print(f"⚠️ Error extracting text: {e}")
-    return None
-
-# --- API Endpoints ---
-
-@app.get("/")
-def read_root():
-    """Provides a welcome message and example questions."""
-    return {
-        "message": "Hello! I’m MARA, ready to help answer your questions about what works in education with strong evidence and systematic meta-analytic methods.",
-        "examples": [
-            "What is the overall effect of direct instruction on student achievement?",
-            "What is the impact of homework on academic performance by grade level?",
-            "Do educational technology tools improve student achievement?",
-            "What is the effect of reduced class sizes on student achievement?",
-        ]
-    }
-
-@app.post("/chat", response_model=AnalysisResponse)
-def chat_api(query: Query):
-    """Main endpoint to perform the three-step meta-analysis."""
+# --- API endpoint ---
+@app.post("/chat")
+async def chat_api(query: Query):
     user_query = query.message
-    if not user_query:
-        raise HTTPException(status_code=400, detail="Query message is required.")
+    
+    async def event_generator():
+        try:
+            # Step 1
+            yield f"data: {json.dumps({'type': 'update', 'content': 'Finding relevant studies...'})}\n\n"
+            step_1_result = await get_studies(user_query)
 
-    print(f"🚀 Starting investigation for: '{user_query}'")
+            # Step 2
+            yield f"data: {json.dumps({'type': 'update', 'content': 'Extracting study data...'})}\n\n"
+            step_2_result = await extract_studies_data(step_1_result)
 
-    try:
-        step_1_result = get_studies(user_query)
-        print("✅ Step 1: Found relevant studies.")
-
-        step_2_result = extract_studies_data(step_1_result)
-        print("✅ Step 2: Extracted data from studies.")
-
-        step_3_result = analyze_studies(step_2_result)
-        print("✅ Step 3: Completed analysis.")
-
-        print("🎉 Investigation complete. Sending response.")
-        return step_3_result
-
-    except Exception as e:
-        print(f"🔥 An error occurred during the process: {e}")
-        raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
-
-
-@app.post("/followup")
-def followup_api(query: FollowupQuery):
-    """Endpoint to handle follow-up questions based on the initial analysis."""
-    print("🔎 Handling a follow-up question...")
-    try:
-        prompt = (
-            f"Given the initial dataset:\n---DATA---\n{query.step_2_data}\n\n"
-            f"And the initial analysis:\n---ANALYSIS---\n{query.step_3_analysis}\n\n"
-            f"Please answer the following follow-up question: '{query.followup_message}'"
-        )
-        
-        # CORRECTED: Call generate_content on the model instance
-        response = gemini_model.generate_content(prompt)
-        
-        reply = extract_text(response)
-        if not reply:
-            raise ValueError("Failed to generate a follow-up response.")
+            # Step 3
+            yield f"data: {json.dumps({'type': 'update', 'content': 'Analyzing study data...'})}\n\n"
+            analysis_result = await analyze_studies(step_2_result)
             
-        print("✅ Follow-up response generated.")
-        return {"reply": reply}
-        
-    except Exception as e:
-        print(f"🔥 An error occurred during the follow-up: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to process follow-up: {e}")
+            # Final result
+            result_data = {"type": "result", "content": analysis_result.model_dump()}
+            yield f"data: {json.dumps(result_data)}\n\n"
+            
+            yield f"data: {json.dumps({'type': 'update', 'content': 'Analysis complete. Goodbye from MARA!'})}\n\n"
 
-# --- Step 1: Get Studies ---
-def get_studies(user_query: str) -> str:
-    prompt = compose_step_one_query(user_query)
-    # CORRECTED: Call generate_content on the model instance
-    response = gemini_model.generate_content(prompt)
-    text = extract_text(response)
-    if not text:
-        raise ValueError("Step 1: Failed to get a valid response from Gemini for finding studies.")
-    return text
+        except Exception as e:
+            print(f"An error occurred in the stream: {e}")
+            error_data = {"type": "error", "content": f"An error occurred: {str(e)}"}
+            yield f"data: {json.dumps(error_data)}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+# ------------------------
+# MARA Steps
+# ------------------------
+async def get_studies(user_query: str) -> str:
+    if not user_query:
+        raise ValueError("Step 1: user_query is empty.")
+    step_1_query = compose_step_one_query(user_query)
+    
+    response = await client.generate_content_async(step_1_query)
+    
+    print(f"🔎 Step 1 Raw Response: {response}")
+
+    if not response.text:
+        raise ValueError("Step 1: No response from Gemini.")
+    return response.text
 
 def compose_step_one_query(user_query: str) -> str:
-    # This function is correct, no changes needed
     return (
-        f"{common_persona_prompt} "
-        f"Find me high-quality studies that look into the question of: {user_query}\n"
-        "Please optimize your search per the following constraints:\n"
-        "1. Search online databases that index published literature, as well as sources such as Google Scholar.\n"
-        "2. Find studies per retrospective reference harvesting and prospective forward citation searching.\n"
-        "3. Attempt to identify unpublished literature such as dissertations and reports from independent research firms.\n"
-        "Exclude any studies which either:\n"
-        "1. lack a comparison or control group.\n"
-        "2. are purely correlational, that do not include either a randomized-controlled trial, quasi-experimental design, or regression discontinuity.\n"
-        "Finally, return these studies in a list of highest quality to lowest, formatting that list by: 'Title, Authors, Date Published.'\n"
-        "Include at least 30 studies, or if fewer than 30 the max available.\n"
-        "Keep your response brief, only including that raw list and nothing more."
+        common_persona_prompt
+        + " Find me high-quality studies that look into the question of: "
+        + user_query
+        + "\nPlease optimize your search per the following constraints: "
+        + "\n1. Search online databases that index published literature, as well as sources such as Google Scholar."
+        + "\n2. Find studies per retrospective reference harvesting and prospective forward citation searching."
+        + "\n3. Attempt to identify unpublished literature such as dissertations and reports from independent research firms."
+        + "\nExclude any studies which either:"
+        + "\n1. lack a comparison or control group."
+        + "\n2. are purely correlational, that do not include either a randomized-controlled trial, quasi-experimental design, or regression discontinuity"
+        + "\nFinally, return these studies in a list of highest quality to lowest, formatting that list by: 'Title, Authors, Date Published.' "
+        + "\nInclude at least 30 studies, or if fewer than 30 the max available."
+        + "\nKeep your response brief, only including that raw list and nothing more."
     )
 
-# --- Step 2: Extract Data ---
-def extract_studies_data(step_1_result: str) -> str:
-    prompt = compose_step_two_query(step_1_result)
-    # CORRECTED: Call generate_content on the model instance
-    response = gemini_model.generate_content(prompt)
-    text = extract_text(response)
-    if not text:
-        raise ValueError("Step 2: Failed to get a valid response from Gemini for data extraction.")
-    return text
+async def extract_studies_data(step_1_result: str) -> str:
+    if not step_1_result:
+        raise ValueError("Step 2: step_1_result is empty.")
+    step_2_query = compose_step_two_query(step_1_result)
+
+    response = await client.generate_content_async(step_2_query)
+    
+    print(f"🔎 Step 2 Raw Response: {response}")
+
+    if not response.text:
+        raise ValueError("Step 2: No response from Gemini.")
+    return response.text
 
 def compose_step_two_query(step_1_result: str) -> str:
-    # This function is correct, no changes needed
     return (
-        f"{common_persona_prompt} "
-        f"First, lookup the papers for each of the studies in this list:\n{step_1_result}\n"
-        "Then, extract the following data to compile into a spreadsheet.\n"
-        "Specifically, organize the data for each study into the following columns:\n"
-        "1. Sample size of treatment and comparison groups\n"
-        "2. Cluster sample sizes (i.e. size of the classroom or school of however the individuals are clustered)\n"
-        "3. Intraclass correlation coefficient (ICC; when available) will be coded for cluster studies. When the ICC estimates are not provided, impute a constant value of 0.20.\n"
-        "4. Effect size for each outcome analysis will be calculated and recorded. These should be the standardized mean difference between the treatment and control group at post-test, ideally adjusted for pre-test differences. Authors can report this in varying ways. The preference is for adjusted effects, found in a linear regression. If adjusted effects are unavailable, raw means and standard deviations can be used.\n"
-        "5. Study design (i.e., randomized controlled trial, quasi-experimental, or regression discontinuity)\n"
-        "Return the results in a spreadsheet, where each row is for each study and each column is for each column feature in the above list.\n"
-        "Keep your response brief, only including those spreadsheet rows and nothing more."
+        common_persona_prompt
+        + " First, Lookup the papers for each of the studies in this list."
+        + "\n"
+        + step_1_result
+        + "\n Then, extract the following data to compile into a spreadsheet."
+        + "\nSpecifically, organize the data for each study into the following columns: "
+        + "\n1. Sample size of treatment and comparison groups"
+        + "\n2. Cluster sample sizes (i.e. size of the classroom or school of however the individuals are clustered)"
+        + "\n3. Intraclass correlation coefficient (ICC; when available) will be coded for cluster studies. When the ICC estimates are not provided, impute a constant value of 0.20."
+        + "\n4. Effect size for each outcome analysis will be calculated and recorded. These should be the standardized mean difference between the treatment and control group at post-test, ideally adjusted for pre-test differences."
+        + "\nAuthors can report this in varying ways. The preference is for adjusted effects, found in a linear regression. If adjusted effects are unavailable, raw means and standard deviations can be used."
+        + "\n6. Study design (i.e., randomized controlled trial, quasi-experimental, or regression discontinuity)"
+        + "\nReturn the results in a spreadsheet, where each row is for each study and each column is for each column feature in the above list."
+        + "\nKeep your response brief, only including those spreadsheet rows and nothing more."
     )
 
-# --- Step 3: Analyze Studies (with JSON output) ---
-def analyze_studies(step_2_result: str) -> AnalysisResponse:
-    prompt = compose_step_three_query(step_2_result)
-    
-    # THIS IS THE KEY FIX
-    # We create a GenerationConfig object and pass it to the 'generation_config' parameter.
-    config = GenerationConfig(
-        response_mime_type="application/json",
-        response_schema=AnalysisResponse,
-    )
-    
-    # CORRECTED: Call generate_content on the model instance with the config object
-    response = gemini_model.generate_content(
-        prompt,
-        generation_config=config
-    )
-    
-    if not hasattr(response, 'text') or not response.text: # Check .text for JSON string
-        raise ValueError("Step 3: Failed to get a valid JSON response from Gemini for analysis.")
-    
-    # The SDK handles parsing when a schema is provided. Access it via response.text
-    # and Pydantic will validate it in the FastAPI response model.
-    # The .candidates[0].content.parts[0].text route is also valid.
-    return AnalysisResponse.parse_raw(response.text)
+async def analyze_studies(step_2_result: str) -> AnalysisResponse:
+    if not step_2_result:
+        raise ValueError("Step 3: step_2_result is empty.")
+    step_3_query = compose_step_three_query(step_2_result)
 
+    response = await client.generate_content_async(
+        step_3_query,
+        generation_config={"response_mime_type": "application/json"},
+    )
+    
+    print(f"🔎 Step 3 Raw Response: {response}")
+
+    parsed_json = json.loads(response.text)
+    return AnalysisResponse(**parsed_json)
 
 def compose_step_three_query(step_2_result: str) -> str:
-    # This function is correct, no changes needed
     return (
-        f"{common_persona_prompt}\n"
-        f"Using this dataset:\n{step_2_result}\n"
-        "Create a simple model with only the impact of the main predictor of interest. Specifically, use a multivariate meta-regression model to conduct the meta-analysis.\n"
-        f"Determine the Confidence level per the following criteria:\n{Confidence.get_description()}\n"
-        "Return this in the Confidence enum.\n"
-        "Generate an overview summarizing the analysis conclusion, in one or two sentences. Return this in the response Summary.\n"
-        "Include all other details in the response Details, making sure to include a description of the analysis process used, the regression models produced, and any corresponding plots, in the corresponding AnalysisDetails fields."
+        common_persona_prompt
+        + "\nUsing this dataset: "
+        + step_2_result
+        + "\ncreate a simple model with only the impact of the main predictor of interest. Specifically, use a multivariate meta-regression model to conduct the meta-analysis."
+        + "\nDetermine the Confidence level per the following criteria: "
+        + Confidence.get_description()
+        + "\nReturn this in the Confidence enum."
+        + "\nGenerate an overview summarizing the analysis conclusion, in one or two sentences. Return this in the response Summary."
+        + "\nInclude all other details in the response Details, making sure to include a description of the analysis process used, the regression models produced, and any correpsonding plots, in the corresponding AnalysisDetails fields."
     )
