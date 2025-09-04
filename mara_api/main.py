@@ -1,37 +1,26 @@
+
+
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 import json
 from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
+# CORRECTED: This is the proper way to import the library
 import google.generativeai as genai
 import os
 import enum
 import asyncio
 
-# --- Client Initialization (UPDATED) ---
-# We will initialize the client during the FastAPI startup event
-client = None
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+# Configure the library with your API key
+genai.configure(api_key=GEMINI_API_KEY)
+
+# Instantiate the model
+client = genai.GenerativeModel("gemini-1.5-pro-latest")
 common_persona_prompt = "You are a senior data analyst with a specialty in meta-analysis."
 
 app = FastAPI()
-
-# NEW: Add a startup event to initialize the Gemini client
-@app.on_event("startup")
-async def startup_event():
-    """
-    Initializes the Gemini client when the application starts.
-    """
-    global client
-    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-    if not GEMINI_API_KEY:
-        # In a real app, you might want to handle this more gracefully
-        # But for deployment, crashing with a clear error is good.
-        raise ValueError("FATAL: GEMINI_API_KEY environment variable not set.")
-    
-    genai.configure(api_key=GEMINI_API_KEY)
-    client = genai.GenerativeModel("gemini-1.5-pro-latest")
-    print("✅ GenAI Client configured and initialized successfully.")
-
 
 # --- CORS setup ---
 origins = [
@@ -83,12 +72,6 @@ async def chat_api(query: Query):
     user_query = query.message
     
     async def event_generator():
-        # Add a check to ensure the client was initialized
-        if not client:
-            error_data = {"type": "error", "content": "Server error: AI client not initialized."}
-            yield f"data: {json.dumps(error_data)}\n\n"
-            return
-            
         try:
             # Step 1
             yield f"data: {json.dumps({'type': 'update', 'content': 'Finding relevant studies...'})}\n\n"
@@ -132,8 +115,6 @@ async def get_studies(user_query: str) -> str:
         raise ValueError("Step 1: No response from Gemini.")
     return response.text
 
-
-# UPDATED PROMPT
 def compose_step_one_query(user_query: str) -> str:
     return (
         common_persona_prompt
@@ -148,8 +129,7 @@ def compose_step_one_query(user_query: str) -> str:
         + "\n2. are purely correlational, that do not include either a randomized-controlled trial, quasi-experimental design, or regression discontinuity"
         + "\nFinally, return these studies in a list of highest quality to lowest, formatting that list by: 'Title, Authors, Date Published.' "
         + "\nInclude at least 30 studies, or if fewer than 30 the max available."
-        # ADDED: Stricter instruction
-        + "\nIMPORTANT: Your entire response must ONLY be the raw list of studies. Do NOT include any preamble, postamble, notes, explanations, or any other conversational text."
+        + "\nKeep your response brief, only including that raw list and nothing more."
     )
 
 async def extract_studies_data(step_1_result: str) -> str:
@@ -165,7 +145,6 @@ async def extract_studies_data(step_1_result: str) -> str:
         raise ValueError("Step 2: No response from Gemini.")
     return response.text
 
-# UPDATED PROMPT
 def compose_step_two_query(step_1_result: str) -> str:
     return (
         common_persona_prompt
@@ -181,8 +160,7 @@ def compose_step_two_query(step_1_result: str) -> str:
         + "\nAuthors can report this in varying ways. The preference is for adjusted effects, found in a linear regression. If adjusted effects are unavailable, raw means and standard deviations can be used."
         + "\n6. Study design (i.e., randomized controlled trial, quasi-experimental, or regression discontinuity)"
         + "\nReturn the results in a spreadsheet, where each row is for each study and each column is for each column feature in the above list."
-        # ADDED: Stricter instruction
-        + "\nIMPORTANT: Your entire response must ONLY be the raw spreadsheet data. Do NOT include any preamble, notes, explanations, or any other conversational text."
+        + "\nKeep your response brief, only including those spreadsheet rows and nothing more."
     )
 
 async def analyze_studies(step_2_result: str) -> AnalysisResponse:
@@ -197,16 +175,9 @@ async def analyze_studies(step_2_result: str) -> AnalysisResponse:
     
     print(f"🔎 Step 3 Raw Response: {response}")
 
-    # Add a try-except block for more robust JSON parsing
-    try:
-        parsed_json = json.loads(response.text)
-        return AnalysisResponse(**parsed_json)
-    except json.JSONDecodeError as e:
-        print(f"🔴 FAILED TO PARSE JSON FROM GEMINI. Raw text was: {response.text}")
-        raise ValueError(f"Step 3 failed because the API did not return valid JSON. Error: {e}")
+    parsed_json = json.loads(response.text)
+    return AnalysisResponse(**parsed_json)
 
-
-# UPDATED PROMPT
 def compose_step_three_query(step_2_result: str) -> str:
     return (
         common_persona_prompt
@@ -218,6 +189,4 @@ def compose_step_three_query(step_2_result: str) -> str:
         + "\nReturn this in the Confidence enum."
         + "\nGenerate an overview summarizing the analysis conclusion, in one or two sentences. Return this in the response Summary."
         + "\nInclude all other details in the response Details, making sure to include a description of the analysis process used, the regression models produced, and any correpsonding plots, in the corresponding AnalysisDetails fields."
-        # ADDED: Stricter instruction
-        + "\nIMPORTANT: Your entire response must ONLY be the raw JSON object that conforms to the schema. Do not wrap it in markdown, or include any other text."
     )
