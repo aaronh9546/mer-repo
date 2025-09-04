@@ -1,14 +1,17 @@
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from fastapi.responses import StreamingResponse
+import json
+from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
 from google import genai
 import os
 import enum
+import asyncio
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-client = genai.Client(api_key=GEMINI_API_KEY)
-gemini_model = "gemini-2.5-pro"
+# Use the async-compatible GenerativeModel client
+client = genai.GenerativeModel(model_name="gemini-1.5-pro-latest", api_key=GEMINI_API_KEY)
 common_persona_prompt = "You are a senior data analyst with a specialty in meta-analysis."
 
 app = FastAPI()
@@ -33,12 +36,11 @@ app.add_middleware(
 class Query(BaseModel):
     message: str
 
-
 class Confidence(enum.Enum):
     GREEN = "GREEN"
     YELLOW = "YELLOW"
     RED = "RED"
-
+    
     @staticmethod
     def get_description():
         return (
@@ -47,12 +49,10 @@ class Confidence(enum.Enum):
             + "\nRED - The topic has a study that would have qualified for “green” or “yellow” but did not because it failed to account for clustering (but did obtain significantly positive outcomes at the student level) or did not meet the sample size requirements. Post-hoc or retrospective studies may also qualify. Correlational studies (e.g., studies that can show a relationship between the intervention and outcome but cannot show causation) have found that the intervention likely improves a relevant student outcome (e.g., reading scores, attendance rates). The studies do not have to be based on large, multi-site samples. No other experimental or quasiexperimental research shows that the intervention negatively affects the outcome."
         )
 
-
 class AnalysisDetails(BaseModel):
     regression_models: str
     process: str
     plots: str
-
 
 class AnalysisResponse(BaseModel):
     summary: str
@@ -60,81 +60,55 @@ class AnalysisResponse(BaseModel):
     details: AnalysisDetails
 
 
-# 🟢 Helper: safely extract Gemini text
-def extract_text(response):
-    """Safely extract text from a Gemini response object."""
-    if not response:
-        return None
-
-    # Debug: log the raw response
-    print("🔎 Gemini raw response:", response)
-
-    # Try direct .text if available
-    if hasattr(response, "text") and response.text:
-        return response.text
-
-    # Try candidates
-    try:
-        if hasattr(response, "candidates") and response.candidates:
-            candidate = response.candidates[0]
-            if hasattr(candidate, "content") and candidate.content.parts:
-                return candidate.content.parts[0].text
-    except Exception as e:
-        print("⚠️ extract_text error while parsing:", e)
-
-    # If nothing worked
-    return None
-
-
 # --- API endpoint ---
-@app.post("/chat", response_model=AnalysisResponse)
-def chat_api(query: Query):
+@app.post("/chat")
+async def chat_api(query: Query):
     user_query = query.message
-    if not user_query:
-        raise HTTPException(status_code=400, detail="Query message is required.")
+    
+    async def event_generator():
+        try:
+            # Step 1
+            yield f"data: {json.dumps({'type': 'update', 'content': 'Finding relevant studies...'})}\n\n"
+            step_1_result = await get_studies(user_query)
 
-    print("Starting an investigation into:", user_query)
+            # Step 2
+            yield f"data: {json.dumps({'type': 'update', 'content': 'Extracting study data...'})}\n\n"
+            step_2_result = await extract_studies_data(step_1_result)
 
-    try:
-        step_1_result = get_studies(user_query)
-        step_2_result = extract_studies_data(step_1_result)
-        analysis_result = analyze_studies(step_2_result)
-    except Exception as e:
-        print(f"An error occurred in the process: {e}")
-        raise HTTPException(
-            status_code=500, detail=f"Sorry, there was an error processing your request: {e}"
-        )
+            # Step 3
+            yield f"data: {json.dumps({'type': 'update', 'content': 'Analyzing study data...'})}\n\n"
+            analysis_result = await analyze_studies(step_2_result)
+            
+            # Final result
+            result_data = {"type": "result", "content": analysis_result.model_dump()}
+            yield f"data: {json.dumps(result_data)}\n\n"
+            
+            yield f"data: {json.dumps({'type': 'update', 'content': 'Analysis complete. Goodbye from MARA!'})}\n\n"
 
-    print("Goodbye from MARA!")
-    return analysis_result
+        except Exception as e:
+            print(f"An error occurred in the stream: {e}")
+            error_data = {"type": "error", "content": f"An error occurred: {str(e)}"}
+            yield f"data: {json.dumps(error_data)}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 # ------------------------
 # MARA Steps
 # ------------------------
-def get_studies(user_query: str) -> str:
-    """
-    # step 1: compile list of research / studies from which analysis will be drawn
-    # step 1.5: limit to higher-quality research, as determined per research features
-    """
+async def get_studies(user_query: str) -> str:
     if not user_query:
         raise ValueError("Step 1: user_query is empty.")
     step_1_query = compose_step_one_query(user_query)
     
-    print("Finding relevant studies...")
-    step_1_response = client.models.generate_content(
-        model=gemini_model,
-        contents=step_1_query,
-    )
-    text = extract_text(step_1_response)
-    if not text:
-        raise ValueError(
-            f"Step 1: No response from Gemini. Raw response: {step_1_response}"
-        )
-    print("Found relevant studies.")
-    print(text)
-    return text
+    response = await client.generate_content_async(step_1_query)
+    
+    # ADDED: Log raw response
+    print(f"🔎 Step 1 Raw Response: {response}")
 
+    if not response.text:
+        raise ValueError("Step 1: No response from Gemini.")
+    return response.text
 
 def compose_step_one_query(user_query: str) -> str:
     return (
@@ -153,29 +127,19 @@ def compose_step_one_query(user_query: str) -> str:
         + "\nKeep your response brief, only including that raw list and nothing more."
     )
 
-
-def extract_studies_data(step_1_result: str) -> str:
-    """
-    # step 2: extract underlying data of that research, preserving which research corresponds to what data
-    """
+async def extract_studies_data(step_1_result: str) -> str:
     if not step_1_result:
         raise ValueError("Step 2: step_1_result is empty.")
     step_2_query = compose_step_two_query(step_1_result)
-    
-    print("Extracting study data...")
-    step_2_response = client.models.generate_content(
-        model=gemini_model,
-        contents=step_2_query,
-    )
-    text = extract_text(step_2_response)
-    if not text:
-        raise ValueError(
-            f"Step 2: No response from Gemini. Raw response: {step_2_response}"
-        )
-    print("Extracted study data.")
-    print(text)
-    return text
 
+    response = await client.generate_content_async(step_2_query)
+    
+    # ADDED: Log raw response
+    print(f"🔎 Step 2 Raw Response: {response}")
+
+    if not response.text:
+        raise ValueError("Step 2: No response from Gemini.")
+    return response.text
 
 def compose_step_two_query(step_1_result: str) -> str:
     return (
@@ -195,34 +159,21 @@ def compose_step_two_query(step_1_result: str) -> str:
         + "\nKeep your response brief, only including those spreadsheet rows and nothing more."
     )
 
-
-def analyze_studies(step_2_result: str) -> AnalysisResponse:
-    """
-    # step 3: perform novel & independent analysis on that underlying data, to yield a model that captures the relationship of those variables, per the given initial features.
-    """
+async def analyze_studies(step_2_result: str) -> AnalysisResponse:
     if not step_2_result:
         raise ValueError("Step 3: step_2_result is empty.")
     step_3_query = compose_step_three_query(step_2_result)
-    
-    print("Analyzing study data...")
-    step_3_response = client.models.generate_content(
-        model=gemini_model,
-        contents=step_3_query,
-        config={
-            "response_mime_type": "application/json",
-            "response_schema": AnalysisResponse,
-        },
+
+    response = await client.generate_content_async(
+        step_3_query,
+        generation_config={"response_mime_type": "application/json"},
     )
     
-    if not hasattr(step_3_response, 'parsed'):
-        raise ValueError(f"Step 3: Failed to parse response from Gemini. Raw response: {step_3_response}")
+    # ADDED: Log raw response
+    print(f"🔎 Step 3 Raw Response: {response}")
 
-    parsed_response: AnalysisResponse = step_3_response.parsed
-    print("Analyzed study data.")
-    print("Analysis overview: " + parsed_response.summary)
-    print("Analysis confidence: " + str(parsed_response.confidence.value))
-    return parsed_response
-
+    parsed_json = json.loads(response.text)
+    return AnalysisResponse(**parsed_json)
 
 def compose_step_three_query(step_2_result: str) -> str:
     return (
