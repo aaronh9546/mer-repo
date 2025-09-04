@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+from typing import Optional
 from fastapi.middleware.cors import CORSMiddleware
 import google.generativeai as genai
 from google.generativeai.types import GenerationConfig
@@ -55,10 +56,11 @@ class Confidence(str, enum.Enum):
         )
 
 class AnalysisDetails(BaseModel):
+class AnalysisDetails(BaseModel):
     """Schema for the detailed components of the analysis."""
-    regression_models: str
-    process: str
-    plots: str
+    regression_models: Optional[str] = None
+    process: Optional[str] = None
+    plots: Optional[str] = None
 
 class AnalysisResponse(BaseModel):
     """Schema for the final, structured analysis from Step 3."""
