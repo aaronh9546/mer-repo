@@ -84,13 +84,13 @@ class AnalysisResponse(BaseModel):
 @app.post("/chat")
 async def chat_api(query: Query):
     user_query = query.message
-    
+
     async def event_generator():
         if not client:
             error_data = {"type": "error", "content": "Server error: AI client not initialized."}
             yield f"data: {json.dumps(error_data)}\n\n"
             return
-            
+
         try:
             # Step 1
             yield f"data: {json.dumps({'type': 'update', 'content': 'Finding relevant studies...'})}\n\n"
@@ -103,15 +103,23 @@ async def chat_api(query: Query):
             # Step 3
             yield f"data: {json.dumps({'type': 'update', 'content': 'Analyzing study data...'})}\n\n"
             analysis_result = await analyze_studies(step_2_result)
-            
+
             # Final result
             result_data = {"type": "result", "content": analysis_result.model_dump()}
             
-            # UPDATED: Use the custom encoder to handle enums
+            # Use the custom encoder to handle enums
             yield f"data: {json.dumps(result_data, cls=CustomEncoder)}\n\n"
-            
-            yield f"data: {json.dumps({'type': 'update', 'content': 'Analysis complete. Here are some things you can do next:'
-                                       })}\n\n"
+
+            # 🛠️ FIXED a syntax error in the 'content' string below
+            suggestions_content = (
+                "Analysis complete. Here are some things you can do next:\n"
+                "- Show me a forest plot of the results\n"
+                "- Show me the procedures used\n"
+                "- Show me a list of included citations\n"
+                "- Show me the meta-analytic models\n"
+                "- Ask another question"
+            )
+            yield f"data: {json.dumps({'type': 'update', 'content': suggestions_content})}\n\n"
 
         except Exception as e:
             print(f"An error occurred in the stream: {e}")
