@@ -110,7 +110,8 @@ async def chat_api(query: Query):
             # UPDATED: Use the custom encoder to handle enums
             yield f"data: {json.dumps(result_data, cls=CustomEncoder)}\n\n"
             
-            yield f"data: {json.dumps({'type': 'update', 'content': 'Analysis complete. Goodbye from MARA!'})}\n\n"
+            yield f"data: {json.dumps({'type': 'update', 'content': 'Analysis complete. Here are some things you can do next:'
+                                       })}\n\n"
 
         except Exception as e:
             print(f"An error occurred in the stream: {e}")
