@@ -74,7 +74,7 @@ class CustomEncoder(json.JSONEncoder):
         return super().default(obj)
 
 client = None
-gemini_model = "gemini-1.5-pro-latest" 
+gemini_model = "gemini-2.5-pro"
 common_persona_prompt = "You are a senior data analyst with a specialty in meta-analysis."
 app = FastAPI()
 
@@ -278,16 +278,17 @@ def compose_step_one_query(user_query: str) -> str:
     return (
         common_persona_prompt
         + " Find me high-quality studies that look into the question of: " + user_query
-        + "\nPlease optimize your search per the following constraints: "
+        + "\nOptimize your search per the following constraints: "
         + "\n1. Search online databases that index published literature, as well as sources such as Google Scholar."
         + "\n2. Find studies per retrospective reference harvesting and prospective forward citation searching."
         + "\n3. Attempt to identify unpublished literature such as dissertations and reports from independent research firms."
         + "\nExclude any studies which either:"
-        + "\n1. lack a comparison or control group."
+        + "\n1. lack a comparison or control group,"
         + "\n2. are purely correlational, that do not include either a randomized-controlled trial, quasi-experimental design, or regression discontinuity"
         + "\nFinally, return these studies in a list of highest quality to lowest, formatting that list by: 'Title, Authors, Date Published.' "
         + "\nInclude at least 30 studies, or if fewer than 30 the max available."
         + "\nKeep your response brief, only including that raw list and nothing more."
+        + "\nDo not engage in casual conversation or add any explanatory text."
     )
 
 async def extract_studies_data(step_1_result: str) -> str:
