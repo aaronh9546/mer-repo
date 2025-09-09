@@ -1,52 +1,104 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Security
+from fastapi.security import OAuth2PasswordBearer, APIKeyHeader
 from fastapi.responses import StreamingResponse
-import json
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 import google.generativeai as genai
 import os
 import enum
+import json
 import asyncio
+import uuid
+from datetime import datetime, timedelta, timezone
+from jose import JWTError, jwt
 
-# --- Custom JSON encoder to handle enums for streaming ---
+# --- Security and Authentication Setup ---
+
+# This secret MUST match the one in your WordPress wp-config.php file.
+INTERNAL_SECRET_KEY = os.getenv("INTERNAL_SECRET_KEY", "YOUR_SUPER_SECRET_PRE_SHARED_KEY") 
+
+# This is a separate secret for signing the JWTs your API issues.
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "a_different_strong_secret_for_jwt")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7 # 1 week expiration for tokens
+
+class TokenData(BaseModel):
+    user_id: int | None = None
+
+class User(BaseModel):
+    id: int
+    email: str
+    name: str | None = None
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token") # Placeholder URL, not used directly
+api_key_header = APIKeyHeader(name="X-Internal-Secret", auto_error=True)
+
+def create_access_token(data: dict, expires_delta: timedelta | None = None):
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.now(timezone.utc) + expires_delta
+    else:
+        expire = datetime.now(timezone.utc) + timedelta(minutes=15)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, JWT_SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
+    credentials_exception = HTTPException(
+        status_code=401,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[ALGORITHM])
+        user_id: int = int(payload.get("sub"))
+        email: str = payload.get("email")
+        name: str = payload.get("name")
+        if user_id is None or email is None:
+            raise credentials_exception
+    except (JWTError, ValueError, TypeError):
+        raise credentials_exception
+    
+    user = User(id=user_id, email=email, name=name)
+    return user
+
+async def check_internal_secret(internal_secret: str = Security(api_key_header)):
+    if internal_secret != INTERNAL_SECRET_KEY:
+        raise HTTPException(status_code=403, detail="Invalid secret key for internal communication")
+
+# --- Application Setup ---
+
+# In-memory storage for conversation context. 
+# For production, replace this with a persistent database (e.g., Redis).
+chat_sessions = {}
+
 class CustomEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, enum.Enum):
             return obj.value
         return super().default(obj)
 
-# --- Client Initialization ---
 client = None
-# Using the consistent model name from your original FastAPI code
 gemini_model = "gemini-1.5-pro-latest" 
 common_persona_prompt = "You are a senior data analyst with a specialty in meta-analysis."
-
 app = FastAPI()
 
 @app.on_event("startup")
 async def startup_event():
-    """
-    Initializes the Gemini client when the application starts.
-    """
     global client
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
     if not GEMINI_API_KEY:
         raise ValueError("FATAL: GEMINI_API_KEY environment variable not set.")
-    
     genai.configure(api_key=GEMINI_API_KEY)
-    # The client is initialized as a GenerativeModel for async operations
     client = genai.GenerativeModel(gemini_model)
     print("✅ GenAI Client configured and initialized successfully.")
 
-
-# --- CORS setup ---
 origins = [
     "https://aaronhanto-nyozw.com",
     "https://timothy-han.com",
     "https://aaronhanto-nyozw.wpcomstaging.com",
     "http://localhost:3000",
 ]
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -57,6 +109,10 @@ app.add_middleware(
 
 # --- Schema (Pydantic Models) ---
 class Query(BaseModel):
+    message: str
+
+class FollowupQuery(BaseModel):
+    conversation_id: str
     message: str
 
 class Confidence(enum.Enum):
@@ -82,10 +138,20 @@ class AnalysisResponse(BaseModel):
     confidence: Confidence
     details: AnalysisDetails
 
+# --- API Endpoints ---
 
-# --- API endpoint ---
+@app.post("/auth/issue-wordpress-token", dependencies=[Depends(check_internal_secret)])
+async def issue_wordpress_token(user: User):
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": str(user.id), "email": user.email, "name": user.name},
+        expires_delta=access_token_expires,
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
+
 @app.post("/chat")
-async def chat_api(query: Query):
+async def chat_api(query: Query, current_user: User = Depends(get_current_user)):
+    print(f"Authenticated request from user: {current_user.email}")
     user_query = query.message
 
     async def event_generator():
@@ -93,25 +159,31 @@ async def chat_api(query: Query):
             error_data = {"type": "error", "content": "Server error: AI client not initialized."}
             yield f"data: {json.dumps(error_data)}\n\n"
             return
-
         try:
-            # Step 1
             yield f"data: {json.dumps({'type': 'update', 'content': 'Finding relevant studies...'})}\n\n"
             step_1_result = await get_studies(user_query)
-
-            # Step 2
             yield f"data: {json.dumps({'type': 'update', 'content': 'Extracting study data...'})}\n\n"
             step_2_result = await extract_studies_data(step_1_result)
-
-            # Step 3
             yield f"data: {json.dumps({'type': 'update', 'content': 'Analyzing study data...'})}\n\n"
             analysis_result = await analyze_studies(step_2_result)
-
-            # Final result
-            result_data = {"type": "result", "content": analysis_result.model_dump()}
             
-            # Use the custom encoder to handle enums
+            conversation_id = str(uuid.uuid4())
+            chat_sessions[conversation_id] = {
+                "user_id": current_user.id,
+                "original_query": user_query,
+                "studies_list": step_1_result,
+                "studies_data": step_2_result,
+                "analysis": analysis_result.model_dump(),
+                "history": [
+                    {"role": "user", "content": user_query},
+                    {"role": "assistant", "content": analysis_result.summary}
+                ]
+            }
+
+            result_data = {"type": "result", "content": analysis_result.model_dump()}
             yield f"data: {json.dumps(result_data, cls=CustomEncoder)}\n\n"
+            
+            yield f"data: {json.dumps({'type': 'conversation_id', 'content': conversation_id})}\n\n"
 
             suggestions_content = (
                 "Analysis complete. Here are some things you can do next:\n"
@@ -122,23 +194,68 @@ async def chat_api(query: Query):
                 "- Ask another question"
             )
             yield f"data: {json.dumps({'type': 'update', 'content': suggestions_content})}\n\n"
-
         except Exception as e:
             print(f"An error occurred in the stream: {e}")
             error_data = {"type": "error", "content": f"An error occurred: {str(e)}"}
             yield f"data: {json.dumps(error_data)}\n\n"
-
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
+@app.post("/followup")
+async def followup_api(query: FollowupQuery, current_user: User = Depends(get_current_user)):
+    conversation_id = query.conversation_id
+    session_data = chat_sessions.get(conversation_id)
 
-# ------------------------
-# MARA Steps
-# ------------------------
+    if not session_data:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    if session_data.get("user_id") != current_user.id:
+        raise HTTPException(status_code=403, detail="You do not have permission to access this conversation.")
+
+    async def followup_generator():
+        try:
+            yield f"data: {json.dumps({'type': 'update', 'content': 'Analyzing followup...'})}\n\n"
+            
+            followup_prompt = compose_followup_query(session_data, query.message)
+            
+            response_stream = await client.generate_content_async(followup_prompt, stream=True)
+            
+            full_response = ""
+            async for chunk in response_stream:
+                if chunk.text:
+                    full_response += chunk.text
+                    yield f"data: {json.dumps({'type': 'message', 'content': chunk.text})}\n\n"
+            
+            session_data["history"].append({"role": "user", "content": query.message})
+            session_data["history"].append({"role": "assistant", "content": full_response})
+            chat_sessions[conversation_id] = session_data
+
+        except Exception as e:
+            print(f"An error occurred in the followup stream: {e}")
+            error_data = {"type": "error", "content": f"An error occurred: {str(e)}"}
+            yield f"data: {json.dumps(error_data)}\n\n"
+
+    return StreamingResponse(followup_generator(), media_type="text/event-stream")
+
+# --- MARA Logic and Prompt Composition ---
+
+def compose_followup_query(session_data: dict, new_message: str) -> str:
+    history_summary = "\n".join([f"{msg['role']}: {msg['content']}" for msg in session_data.get("history", [])])
+    
+    return (
+        f"{common_persona_prompt}\n"
+        f"You are continuing a conversation with a user. Below is the context from their original query and the chat history so far.\n\n"
+        f"--- Original Context ---\n"
+        f"Original Question: {session_data['original_query']}\n"
+        f"Analysis Summary: {session_data['analysis']['summary']}\n"
+        f"The analysis was based on data from several studies.\n"
+        f"--- End Original Context ---\n\n"
+        f"--- Conversation History ---\n"
+        f"{history_summary}\n"
+        f"--- End History ---\n\n"
+        f"Now, please answer the user's latest message based on all the information provided.\n"
+        f"User's new message: \"{new_message}\""
+    )
+
 async def get_studies(user_query: str) -> str:
-    """
-    # step 1: compile list of research / studies from which analysis will be drawn
-    # step 1.5: limit to higher-quality research, as determined per research features
-    """
     if not user_query:
         raise ValueError("Step 1: user_query is empty.")
     step_1_query = compose_step_one_query(user_query)
@@ -149,11 +266,9 @@ async def get_studies(user_query: str) -> str:
     return response.text
 
 def compose_step_one_query(user_query: str) -> str:
-    # UPDATED: Prompt now matches the new Python script.
     return (
         common_persona_prompt
-        + " Find me high-quality studies that look into the question of: "
-        + user_query
+        + " Find me high-quality studies that look into the question of: " + user_query
         + "\nPlease optimize your search per the following constraints: "
         + "\n1. Search online databases that index published literature, as well as sources such as Google Scholar."
         + "\n2. Find studies per retrospective reference harvesting and prospective forward citation searching."
@@ -167,9 +282,6 @@ def compose_step_one_query(user_query: str) -> str:
     )
 
 async def extract_studies_data(step_1_result: str) -> str:
-    """
-    # step 2: extract underlying data of that research, preserving which research corresponds to what data
-    """
     if not step_1_result:
         raise ValueError("Step 2: step_1_result is empty.")
     step_2_query = compose_step_two_query(step_1_result)
@@ -180,12 +292,9 @@ async def extract_studies_data(step_1_result: str) -> str:
     return response.text
 
 def compose_step_two_query(step_1_result: str) -> str:
-    # UPDATED: Prompt now matches the new Python script.
     return (
         common_persona_prompt
-        + " First, lookup the papers for each of the studies in this list."
-        + "\n"
-        + step_1_result
+        + " First, lookup the papers for each of the studies in this list.\n" + step_1_result
         + "\n Then, extract the following data to compile into a spreadsheet."
         + "\nSpecifically, organize the data for each study into the following columns: "
         + "\n1. Sample size of treatment and comparison groups"
@@ -198,50 +307,29 @@ def compose_step_two_query(step_1_result: str) -> str:
         + "\nKeep your response brief, only including those spreadsheet rows and nothing more."
     )
 
-
 async def analyze_studies(step_2_result: str) -> AnalysisResponse:
-    """
-    # step 3: perform novel & independent analysis on that underlying data.
-    # UPDATED: This function now uses the `response_schema` feature to enforce
-    # a structured JSON output from the model, making it more reliable and
-    # removing the need for manual key sanitization.
-    """
     if not step_2_result:
         raise ValueError("Step 3: step_2_result is empty.")
     step_3_query = compose_step_three_query(step_2_result)
-
-    # Define the generation config to enforce the JSON schema
     generation_config = genai.types.GenerationConfig(
         response_mime_type="application/json",
         response_schema=AnalysisResponse,
     )
-
     try:
-        response = await client.generate_content_async(
-            step_3_query,
-            generation_config=generation_config,
-        )
+        response = await client.generate_content_async(step_3_query, generation_config=generation_config)
         print(f"🔎 Step 3 Raw Response: {response.text}")
-
-        # With response_schema, we can directly parse the text into our Pydantic model.
-        # This is more robust than manual parsing and sanitization.
         parsed_response = AnalysisResponse.model_validate_json(response.text)
         return parsed_response
-        
     except Exception as e:
         print(f"🔴 FAILED TO GET AND PARSE VALIDATED JSON FROM GEMINI. Error: {e}")
         raise ValueError(f"Step 3 failed because the API did not return valid JSON. Error: {e}")
 
-
 def compose_step_three_query(step_2_result: str) -> str:
-    # UPDATED: Prompt now matches the new Python script and is optimized for schema-based response.
     return (
         common_persona_prompt
-        + "\nUsing this dataset: "
-        + step_2_result
+        + "\nUsing this dataset: " + step_2_result
         + "\ncreate a simple model with only the impact of the main predictor of interest. Specifically, use a multivariate meta-regression model to conduct the meta-analysis."
-        + "\nDetermine the Confidence level per the following criteria: "
-        + Confidence.get_description()
+        + "\nDetermine the Confidence level per the following criteria: " + Confidence.get_description()
         + "\nReturn this in the Confidence enum."
         + "\nGenerate an overview summarizing the analysis conclusion, in one or two sentences. Return this in the response Summary."
         + "\nInclude all other details in the response Details, making sure to include a description of the analysis process used, the regression models produced, and any correpsonding plots, in the corresponding AnalysisDetails fields."
