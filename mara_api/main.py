@@ -14,10 +14,7 @@ from jose import JWTError, jwt
 
 # --- Security and Authentication Setup ---
 
-# This secret MUST match the one in your WordPress wp-config.php file.
 INTERNAL_SECRET_KEY = os.getenv("INTERNAL_SECRET_KEY", "YOUR_SUPER_SECRET_PRE_SHARED_KEY") 
-
-# This is a separate secret for signing the JWTs your API issues.
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "a_different_strong_secret_for_jwt")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7 # 1 week expiration for tokens
@@ -30,7 +27,7 @@ class User(BaseModel):
     email: str
     name: str | None = None
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token") # Placeholder URL, not used directly
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 api_key_header = APIKeyHeader(name="X-Internal-Secret", auto_error=True)
 
 def create_access_token(data: dict, expires_delta: timedelta | None = None):
@@ -68,8 +65,6 @@ async def check_internal_secret(internal_secret: str = Security(api_key_header))
 
 # --- Application Setup ---
 
-# In-memory storage for conversation context. 
-# For production, replace this with a persistent database (e.g., Redis).
 chat_sessions = {}
 
 class CustomEncoder(json.JSONEncoder):
@@ -79,7 +74,7 @@ class CustomEncoder(json.JSONEncoder):
         return super().default(obj)
 
 client = None
-gemini_model = "gemini-2.5-pro"
+gemini_model = "gemini-1.5-pro-latest" 
 common_persona_prompt = "You are a senior data analyst with a specialty in meta-analysis."
 app = FastAPI()
 
@@ -89,8 +84,12 @@ async def startup_event():
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
     if not GEMINI_API_KEY:
         raise ValueError("FATAL: GEMINI_API_KEY environment variable not set.")
+    
     genai.configure(api_key=GEMINI_API_KEY)
+    
+    # This is the original, simple initialization with default safety settings
     client = genai.GenerativeModel(gemini_model)
+    
     print("✅ GenAI Client configured and initialized successfully.")
 
 origins = [
@@ -122,11 +121,11 @@ class Confidence(enum.Enum):
     
     @staticmethod
     def get_description():
-        # UPDATED: This description is much shorter, saving hundreds of tokens.
+        # This is the original, very long and verbose description
         return (
-            "GREEN: Strong evidence from at least one well-designed experimental study (RCT) with a large, multi-site sample (>350 participants)."
-            + "\nYELLOW: Meets GREEN criteria but uses a quasi-experimental design (e.g., matched studies) instead of an RCT."
-            + "\nRED: Correlational studies, or studies that would have met GREEN/YELLOW criteria but have methodological flaws like failing to account for clustering or having a small sample size."
+            "GREEN - If the research on the topic has a well-conducted, randomized study showing a statistically significant positive effect on at least one outcome measure (e.g., state test or national standardized test) analyzed at the proper level of clustering (class/school or student) with a multi-site sample of at least 350 participants. Strong evidence from at least one well-designed and wellimplemented experimental study. Experimental studies were used to answer this question. Experimental studies are those in which students are randomly assigned to treatment or control groups, allowing researchers to speak with confidence about the likelihood that an intervention causes an outcome. Well-designed and well implemented experimental studies. The research studies use large (larger than 350 participants), multi-site samples. No other experimental or quasiexperimental research shows that the intervention negatively affects the outcome. Researchers have found that the intervention improves outcomes for the specific student subgroups that the district or school intends to support with the intervention."
+            + "\nYELLOW - If it meets all standards for “green” stated above, except that instead of using a randomized design, qualifying studies are prospective quasi-experiments (i.e., matched studies). Quasiexperimental studies (e.g., Regression Discontinuity Design) are those in which students have not been randomly assigned to treatment or control groups, but researchers are using statistical matching methods that allow them to speak with confidence about the likelihood that an intervention causes an outcome. The research studies use large, multi-site samples. No other experimental or quasiexperimental research shows that the intervention negatively affects the outcome. Researchers have found that the intervention improves outcomes for the specific student subgroups that the district or school intends to support with the intervention."
+            + "\nRED - The topic has a study that would have qualified for “green” or “yellow” but did not because it failed to account for clustering (but did obtain significantly positive outcomes at the student level) or did not meet the sample size requirements. Post-hoc or retrospective studies may also qualify. Correlational studies (e.g., studies that can show a relationship between the intervention and outcome but cannot show causation) have found that the intervention likely improves a relevant student outcome (e.g., reading scores, attendance rates). The studies do not have to be based on large, multi-site samples. No other experimental or quasiexperimental research shows that the intervention negatively affects the outcome."
         )
 
 class AnalysisDetails(BaseModel):
@@ -164,9 +163,11 @@ async def chat_api(query: Query, current_user: User = Depends(get_current_user))
             yield f"data: {json.dumps({'type': 'update', 'content': 'Finding relevant studies...'})}\n\n"
             step_1_result = await get_studies(user_query)
             yield f"data: {json.dumps({'type': 'step_result', 'step': 1, 'content': step_1_result})}\n\n"
+
             yield f"data: {json.dumps({'type': 'update', 'content': 'Extracting study data...'})}\n\n"
             step_2_result = await extract_studies_data(step_1_result)
             yield f"data: {json.dumps({'type': 'step_result', 'step': 2, 'content': step_2_result})}\n\n"
+
             yield f"data: {json.dumps({'type': 'update', 'content': 'Analyzing study data...'})}\n\n"
             analysis_result = await analyze_studies(step_2_result)
             
@@ -261,26 +262,32 @@ def compose_followup_query(session_data: dict, new_message: str) -> str:
 async def get_studies(user_query: str) -> str:
     if not user_query:
         raise ValueError("Step 1: user_query is empty.")
+    
     step_1_query = compose_step_one_query(user_query)
     response = await client.generate_content_async(step_1_query)
+    
     print(f"🔎 Step 1 Raw Response: {response.text}")
+    
     if not response.text:
         raise ValueError("Step 1: No response from Gemini.")
+        
     return response.text
 
 def compose_step_one_query(user_query: str) -> str:
-    # UPDATED with a multi-step "verify and filter" instruction
+    # This is the original, less-strict prompt
     return (
-        "You are an automated research data extraction bot. Your sole purpose is to return raw, parsable text. You must not engage in conversation or add any explanatory text."
-        + "\nYour task is to find high-quality studies on the question of: " + user_query
-        + "\nFirst, find a broad list of potential studies using the following constraints: "
+        common_persona_prompt
+        + " Find me high-quality studies that look into the question of: " + user_query
+        + "\nPlease optimize your search per the following constraints: "
         + "\n1. Search online databases that index published literature, as well as sources such as Google Scholar."
         + "\n2. Find studies per retrospective reference harvesting and prospective forward citation searching."
         + "\n3. Attempt to identify unpublished literature such as dissertations and reports from independent research firms."
-        + "\n\nSecond, after finding potential studies, you must perform a critical verification step. Review every study you found and EXCLUDE any that fail these two rules:"
-        + "\n1. The study MUST have a clear comparison or control group with reported sample sizes."
-        + "\n2. The study MUST use a randomized-controlled trial, quasi-experimental, or regression discontinuity design. Purely correlational studies are forbidden."
-        + "\n\nCRITICAL: Only after you have filtered your list according to these rules, present the final, clean list of verified studies. The list should be ordered from highest quality to lowest, formatted as 'Title, Authors, Date Published.'. Your entire response must be ONLY the raw list. Do not include conversational text or any of the excluded studies."
+        + "\nExclude any studies which either:"
+        + "\n1. lack a comparison or control group."
+        + "\n2. are purely correlational, that do not include either a randomized-controlled trial, quasi-experimental design, or regression discontinuity"
+        + "\nFinally, return these studies in a list of highest quality to lowest, formatting that list by: 'Title, Authors, Date Published.' "
+        + "\nInclude at least 30 studies, or if fewer than 30 the max available."
+        + "\nKeep your response brief, only including that raw list and nothing more."
     )
 
 async def extract_studies_data(step_1_result: str) -> str:
@@ -294,10 +301,11 @@ async def extract_studies_data(step_1_result: str) -> str:
     return response.text
 
 def compose_step_two_query(step_1_result: str) -> str:
+    # This is the original, less-strict prompt
     return (
-        "You are an automated research data extraction bot. Your sole purpose is to return raw, parsable, spreadsheet-like text. You must not engage in conversation or add any explanatory text."
-        + "\nFirst, lookup the papers for each of the studies in this list.\n" + step_1_result
-        + "\nThen, extract the following data to compile into a spreadsheet."
+        common_persona_prompt
+        + " First, lookup the papers for each of the studies in this list.\n" + step_1_result
+        + "\n Then, extract the following data to compile into a spreadsheet."
         + "\nSpecifically, organize the data for each study into the following columns: "
         + "\n1. Sample size of treatment and comparison groups"
         + "\n2. Cluster sample sizes (i.e. size of the classroom or school of however the individuals are clustered)"
@@ -305,7 +313,8 @@ def compose_step_two_query(step_1_result: str) -> str:
         + "\n4. Effect size for each outcome analysis will be calculated and recorded. These should be the standardized mean difference between the treatment and control group at post-test, ideally adjusted for pre-test differences."
         + "\nAuthors can report this in varying ways. The preference is for adjusted effects, found in a linear regression. If adjusted effects are unavailable, raw means and standard deviations can be used."
         + "\n6. Study design (i.e., randomized controlled trial, quasi-experimental, or regression discontinuity)"
-        + "\nCRITICAL: Your entire response must ONLY be the raw spreadsheet data. Do NOT include any preamble, notes, explanations, or any other conversational text. Your response must begin with the first column of the first study."
+        + "\nReturn the results in a spreadsheet, where each row is for each study and each column is for each column feature in the above list."
+        + "\nKeep your response brief, only including those spreadsheet rows and nothing more."
     )
 
 async def analyze_studies(step_2_result: str) -> AnalysisResponse:
@@ -326,7 +335,7 @@ async def analyze_studies(step_2_result: str) -> AnalysisResponse:
         raise ValueError(f"Step 3 failed because the API did not return valid JSON. Error: {e}")
 
 def compose_step_three_query(step_2_result: str) -> str:
-    # UPDATED with instructions for brevity.
+    # This is the version with the full, verbose Confidence description
     return (
         common_persona_prompt
         + "\nUsing this dataset: " + step_2_result
@@ -334,6 +343,5 @@ def compose_step_three_query(step_2_result: str) -> str:
         + "\nDetermine the Confidence level per the following criteria: " + Confidence.get_description()
         + "\nReturn this in the Confidence enum."
         + "\nGenerate an overview summarizing the analysis conclusion, in one or two sentences. Return this in the response Summary."
-        + "\nCRITICAL: For the 'details' object, be concise. Use bullet points for the process and list only the key regression models and plots. Keep the descriptions brief."
-        + "\nYour entire response must ONLY be a raw JSON object matching the required schema. Do not include markdown or any other text."
+        + "\nInclude all other details in the response Details, making sure to include a description of the analysis process used, the regression models produced, and any correpsonding plots, in the corresponding AnalysisDetails fields."
     )
