@@ -162,8 +162,10 @@ async def chat_api(query: Query, current_user: User = Depends(get_current_user))
         try:
             yield f"data: {json.dumps({'type': 'update', 'content': 'Finding relevant studies...'})}\n\n"
             step_1_result = await get_studies(user_query)
+            yield f"data: {json.dumps({'type': 'step_result', 'step': 1, 'content': step_1_result})}\n\n"
             yield f"data: {json.dumps({'type': 'update', 'content': 'Extracting study data...'})}\n\n"
             step_2_result = await extract_studies_data(step_1_result)
+            yield f"data: {json.dumps({'type': 'step_result', 'step': 2, 'content': step_2_result})}\n\n"
             yield f"data: {json.dumps({'type': 'update', 'content': 'Analyzing study data...'})}\n\n"
             analysis_result = await analyze_studies(step_2_result)
             
