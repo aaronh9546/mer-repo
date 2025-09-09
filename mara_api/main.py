@@ -326,6 +326,7 @@ async def analyze_studies(step_2_result: str) -> AnalysisResponse:
         raise ValueError(f"Step 3 failed because the API did not return valid JSON. Error: {e}")
 
 def compose_step_three_query(step_2_result: str) -> str:
+    # UPDATED with instructions for brevity.
     return (
         common_persona_prompt
         + "\nUsing this dataset: " + step_2_result
@@ -333,5 +334,6 @@ def compose_step_three_query(step_2_result: str) -> str:
         + "\nDetermine the Confidence level per the following criteria: " + Confidence.get_description()
         + "\nReturn this in the Confidence enum."
         + "\nGenerate an overview summarizing the analysis conclusion, in one or two sentences. Return this in the response Summary."
-        + "\nInclude all other details in the response Details, making sure to include a description of the analysis process used, the regression models produced, and any correpsonding plots, in the corresponding AnalysisDetails fields."
+        + "\nCRITICAL: For the 'details' object, be concise. Use bullet points for the process and list only the key regression models and plots. Keep the descriptions brief."
+        + "\nYour entire response must ONLY be a raw JSON object matching the required schema. Do not include markdown or any other text."
     )
