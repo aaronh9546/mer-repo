@@ -4,7 +4,6 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 import google.generativeai as genai
-from google.generativeai.types import HarmCategory, HarmBlockThreshold
 import os
 import enum
 import json
@@ -90,25 +89,9 @@ async def startup_event():
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
     if not GEMINI_API_KEY:
         raise ValueError("FATAL: GEMINI_API_KEY environment variable not set.")
-    
     genai.configure(api_key=GEMINI_API_KEY)
-
-    # Define safety settings to be less restrictive.
-    # This often solves issues with responses from cloud servers.
-    safety_settings = {
-        HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-        HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-        HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-        HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-    }
-    
-    # Initialize the model with the new safety settings.
-    client = genai.GenerativeModel(
-        model_name=gemini_model,
-        safety_settings=safety_settings
-    )
-    
-    print("✅ GenAI Client configured and initialized successfully with custom safety settings.")
+    client = genai.GenerativeModel(gemini_model)
+    print("✅ GenAI Client configured and initialized successfully.")
 
 origins = [
     "https://aaronhanto-nyozw.com",
@@ -177,17 +160,12 @@ async def chat_api(query: Query, current_user: User = Depends(get_current_user))
             yield f"data: {json.dumps(error_data)}\n\n"
             return
         try:
-            # --- Step 1 ---
             yield f"data: {json.dumps({'type': 'update', 'content': 'Finding relevant studies...'})}\n\n"
             step_1_result = await get_studies(user_query)
             yield f"data: {json.dumps({'type': 'step_result', 'step': 1, 'content': step_1_result})}\n\n"
-
-            # --- Step 2 ---
             yield f"data: {json.dumps({'type': 'update', 'content': 'Extracting study data...'})}\n\n"
             step_2_result = await extract_studies_data(step_1_result)
             yield f"data: {json.dumps({'type': 'step_result', 'step': 2, 'content': step_2_result})}\n\n"
-
-            # --- Step 3 ---
             yield f"data: {json.dumps({'type': 'update', 'content': 'Analyzing study data...'})}\n\n"
             analysis_result = await analyze_studies(step_2_result)
             
@@ -280,37 +258,29 @@ def compose_followup_query(session_data: dict, new_message: str) -> str:
     )
 
 async def get_studies(user_query: str) -> str:
-    """
-    # step 1: compile list of research / studies from which analysis will be drawn
-    # step 1.5: limit to higher-quality research, as determined per research features
-    """
     if not user_query:
         raise ValueError("Step 1: user_query is empty.")
-    
     step_1_query = compose_step_one_query(user_query)
     response = await client.generate_content_async(step_1_query)
-    
     print(f"🔎 Step 1 Raw Response: {response.text}")
-    
     if not response.text:
         raise ValueError("Step 1: No response from Gemini.")
-        
     return response.text
 
 def compose_step_one_query(user_query: str) -> str:
     return (
-        common_persona_prompt
-        + " Find me high-quality studies that look into the question of: " + user_query
+        "You are an automated research data extraction bot. Your sole purpose is to return raw, parsable text. You must not engage in conversation or add any explanatory text."
+        + "\nFind me high-quality studies that look into the question of: " + user_query
         + "\nPlease optimize your search per the following constraints: "
         + "\n1. Search online databases that index published literature, as well as sources such as Google Scholar."
         + "\n2. Find studies per retrospective reference harvesting and prospective forward citation searching."
         + "\n3. Attempt to identify unpublished literature such as dissertations and reports from independent research firms."
         + "\nExclude any studies which either:"
         + "\n1. lack a comparison or control group."
-        + "\n2. are purely correlational, that do not include either a randomized-controlled trial, quasi-experimental design, or regression discontinuity"
+        + "\n2. are purely correlational, that do not include either a randomized-controlled trial, quasi-experimental design, or regression discontinuity."
         + "\nFinally, return these studies in a list of highest quality to lowest, formatting that list by: 'Title, Authors, Date Published.' "
         + "\nInclude at least 30 studies, or if fewer than 30 the max available."
-        + "\nKeep your response brief, only including that raw list and nothing more."
+        + "\nCRITICAL: Your entire response must be ONLY the raw list of studies. Do NOT include any preamble like 'Certainly, here is a list...' or any other conversational text. Your response must begin directly with the title of the first study."
     )
 
 async def extract_studies_data(step_1_result: str) -> str:
@@ -325,9 +295,9 @@ async def extract_studies_data(step_1_result: str) -> str:
 
 def compose_step_two_query(step_1_result: str) -> str:
     return (
-        common_persona_prompt
-        + " First, lookup the papers for each of the studies in this list.\n" + step_1_result
-        + "\n Then, extract the following data to compile into a spreadsheet."
+        "You are an automated research data extraction bot. Your sole purpose is to return raw, parsable, spreadsheet-like text. You must not engage in conversation or add any explanatory text."
+        + "\nFirst, lookup the papers for each of the studies in this list.\n" + step_1_result
+        + "\nThen, extract the following data to compile into a spreadsheet."
         + "\nSpecifically, organize the data for each study into the following columns: "
         + "\n1. Sample size of treatment and comparison groups"
         + "\n2. Cluster sample sizes (i.e. size of the classroom or school of however the individuals are clustered)"
@@ -335,8 +305,7 @@ def compose_step_two_query(step_1_result: str) -> str:
         + "\n4. Effect size for each outcome analysis will be calculated and recorded. These should be the standardized mean difference between the treatment and control group at post-test, ideally adjusted for pre-test differences."
         + "\nAuthors can report this in varying ways. The preference is for adjusted effects, found in a linear regression. If adjusted effects are unavailable, raw means and standard deviations can be used."
         + "\n6. Study design (i.e., randomized controlled trial, quasi-experimental, or regression discontinuity)"
-        + "\nReturn the results in a spreadsheet, where each row is for each study and each column is for each column feature in the above list."
-        + "\nKeep your response brief, only including those spreadsheet rows and nothing more."
+        + "\nCRITICAL: Your entire response must ONLY be the raw spreadsheet data. Do NOT include any preamble, notes, explanations, or any other conversational text. Your response must begin with the first column of the first study."
     )
 
 async def analyze_studies(step_2_result: str) -> AnalysisResponse:
