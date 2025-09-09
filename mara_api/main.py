@@ -4,6 +4,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 import google.generativeai as genai
+from google.generativeai.types import HarmCategory, HarmBlockThreshold
 import os
 import enum
 import json
@@ -89,9 +90,25 @@ async def startup_event():
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
     if not GEMINI_API_KEY:
         raise ValueError("FATAL: GEMINI_API_KEY environment variable not set.")
+    
     genai.configure(api_key=GEMINI_API_KEY)
-    client = genai.GenerativeModel(gemini_model)
-    print("✅ GenAI Client configured and initialized successfully.")
+
+    # Define safety settings to be less restrictive.
+    # This often solves issues with responses from cloud servers.
+    safety_settings = {
+        HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+        HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+        HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+        HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+    }
+    
+    # Initialize the model with the new safety settings.
+    client = genai.GenerativeModel(
+        model_name=gemini_model,
+        safety_settings=safety_settings
+    )
+    
+    print("✅ GenAI Client configured and initialized successfully with custom safety settings.")
 
 origins = [
     "https://aaronhanto-nyozw.com",
@@ -160,12 +177,17 @@ async def chat_api(query: Query, current_user: User = Depends(get_current_user))
             yield f"data: {json.dumps(error_data)}\n\n"
             return
         try:
+            # --- Step 1 ---
             yield f"data: {json.dumps({'type': 'update', 'content': 'Finding relevant studies...'})}\n\n"
             step_1_result = await get_studies(user_query)
             yield f"data: {json.dumps({'type': 'step_result', 'step': 1, 'content': step_1_result})}\n\n"
+
+            # --- Step 2 ---
             yield f"data: {json.dumps({'type': 'update', 'content': 'Extracting study data...'})}\n\n"
             step_2_result = await extract_studies_data(step_1_result)
             yield f"data: {json.dumps({'type': 'step_result', 'step': 2, 'content': step_2_result})}\n\n"
+
+            # --- Step 3 ---
             yield f"data: {json.dumps({'type': 'update', 'content': 'Analyzing study data...'})}\n\n"
             analysis_result = await analyze_studies(step_2_result)
             
@@ -258,13 +280,21 @@ def compose_followup_query(session_data: dict, new_message: str) -> str:
     )
 
 async def get_studies(user_query: str) -> str:
+    """
+    # step 1: compile list of research / studies from which analysis will be drawn
+    # step 1.5: limit to higher-quality research, as determined per research features
+    """
     if not user_query:
         raise ValueError("Step 1: user_query is empty.")
+    
     step_1_query = compose_step_one_query(user_query)
     response = await client.generate_content_async(step_1_query)
+    
     print(f"🔎 Step 1 Raw Response: {response.text}")
+    
     if not response.text:
         raise ValueError("Step 1: No response from Gemini.")
+        
     return response.text
 
 def compose_step_one_query(user_query: str) -> str:
