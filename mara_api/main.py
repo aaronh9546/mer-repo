@@ -269,19 +269,18 @@ async def get_studies(user_query: str) -> str:
     return response.text
 
 def compose_step_one_query(user_query: str) -> str:
+    # UPDATED with a multi-step "verify and filter" instruction
     return (
         "You are an automated research data extraction bot. Your sole purpose is to return raw, parsable text. You must not engage in conversation or add any explanatory text."
-        + "\nFind me high-quality studies that look into the question of: " + user_query
-        + "\nPlease optimize your search per the following constraints: "
+        + "\nYour task is to find high-quality studies on the question of: " + user_query
+        + "\nFirst, find a broad list of potential studies using the following constraints: "
         + "\n1. Search online databases that index published literature, as well as sources such as Google Scholar."
         + "\n2. Find studies per retrospective reference harvesting and prospective forward citation searching."
         + "\n3. Attempt to identify unpublished literature such as dissertations and reports from independent research firms."
-        + "\nExclude any studies which either:"
-        + "\n1. lack a comparison or control group."
-        + "\n2. are purely correlational, that do not include either a randomized-controlled trial, quasi-experimental design, or regression discontinuity."
-        + "\nFinally, return these studies in a list of highest quality to lowest, formatting that list by: 'Title, Authors, Date Published.' "
-        + "\nInclude at least 30 studies, or if fewer than 30 the max available."
-        + "\nCRITICAL: Your entire response must be ONLY the raw list of studies. Do NOT include any preamble like 'Certainly, here is a list...' or any other conversational text. Your response must begin directly with the title of the first study."
+        + "\n\nSecond, after finding potential studies, you must perform a critical verification step. Review every study you found and EXCLUDE any that fail these two rules:"
+        + "\n1. The study MUST have a clear comparison or control group with reported sample sizes."
+        + "\n2. The study MUST use a randomized-controlled trial, quasi-experimental, or regression discontinuity design. Purely correlational studies are forbidden."
+        + "\n\nCRITICAL: Only after you have filtered your list according to these rules, present the final, clean list of verified studies. The list should be ordered from highest quality to lowest, formatted as 'Title, Authors, Date Published.'. Your entire response must be ONLY the raw list. Do not include conversational text or any of the excluded studies."
     )
 
 async def extract_studies_data(step_1_result: str) -> str:
