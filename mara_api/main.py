@@ -129,28 +129,14 @@ class Confidence(enum.Enum):
         )
 
 class AnalysisDetails(BaseModel):
-    methodology: str
-    limitations: str
-    notes: str
+    regression_models: str
+    process: str
+    plots: str
 
 class AnalysisResponse(BaseModel):
     summary: str
     confidence: Confidence
     details: AnalysisDetails
-
-
-def safe_parse_analysis(json_data: dict) -> AnalysisResponse:
-    """
-    Ensures that the AnalysisResponse always has the required 'details' object.
-    If Gemini forgets to include it, we patch in default placeholders.
-    """
-    if "details" not in json_data:
-        json_data["details"] = {
-            "methodology": "Not available",
-            "limitations": "Not available",
-            "notes": "Not available"
-        }
-    return AnalysisResponse(**json_data)
 
 # --- API Endpoints ---
 
