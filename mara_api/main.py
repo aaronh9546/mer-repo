@@ -95,7 +95,7 @@ async def startup_event():
 origins = [
     "https://myeducationresearcher.com",
     "https://timothy-han.com",
-    "https://aaronhanto-nyozw.wpcomstaging.com",
+    "https://jsdean1517-pdkfw.wpcomstaging.com",
     "http://localhost:3000",
 ]
 app.add_middleware(
