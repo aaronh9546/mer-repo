@@ -18,7 +18,8 @@ from typing import Optional
 
 INTERNAL_SECRET_KEY = os.getenv("INTERNAL_SECRET_KEY", "YOUR_SUPER_SECRET_PRE_SHARED_KEY")
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "a_different_strong_secret_for_jwt")
-ALGORITHM = "HS26"
+# MODIFICATION: Corrected the algorithm from "HS26" to "HS256"
+ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7 # 1 week expiration for tokens
 
 class User(BaseModel):
@@ -219,8 +220,6 @@ async def _extract_single_study_data(study_title: str) -> ExtractedData:
     except Exception as e:
         print(f"🔴 Failed to extract valid JSON for '{study_title}'. Error: {e}. Returning placeholder.")
         return ExtractedData(study=f"{study_title[:30]}... (Error)", treatment_n=0, comparison_n=0, effect_size=0.0, design="Extraction Failed")
-
-# --- MODIFIED: New two-call analysis logic ---
 
 def _compose_raw_analysis_query(data_table: str) -> str:
     """Prompt for the first call: just do the analysis and return plain text."""
