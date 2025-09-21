@@ -18,7 +18,6 @@ from typing import Optional
 
 INTERNAL_SECRET_KEY = os.getenv("INTERNAL_SECRET_KEY", "YOUR_SUPER_SECRET_PRE_SHARED_KEY")
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "a_different_strong_secret_for_jwt")
-# MODIFICATION: Corrected the algorithm from "HS26" to "HS256"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7 # 1 week expiration for tokens
 
@@ -120,14 +119,11 @@ class AnalyzeRequest(BaseModel):
     session_id: str
     collected_data: list[ExtractedData]
 
+# MODIFICATION: Removed the @staticmethod from the Enum to fix the schema error.
 class Confidence(enum.Enum):
     GREEN = "GREEN"
     YELLOW = "YELLOW"
     RED = "RED"
-    
-    @staticmethod
-    def get_description():
-        return "GREEN for strong experimental evidence, YELLOW for strong quasi-experimental evidence, RED for correlational or weaker evidence."
 
 class AnalysisDetails(BaseModel):
     regression_models: str
@@ -223,13 +219,15 @@ async def _extract_single_study_data(study_title: str) -> ExtractedData:
 
 def _compose_raw_analysis_query(data_table: str) -> str:
     """Prompt for the first call: just do the analysis and return plain text."""
+    # MODIFICATION: The confidence description is now hardcoded here instead of in the Enum.
+    confidence_description = "GREEN for strong experimental evidence, YELLOW for strong quasi-experimental evidence, RED for correlational or weaker evidence."
     return (f"{common_persona_prompt}\nUsing this dataset:\n{data_table}\n"
             "Perform a meta-analysis. In your response, you must include sections covering these four topics:\n"
-            "1. A one-sentence 'Summary' of the final conclusion.\n"
-            "2. A 'Confidence' level (GREEN, YELLOW, or RED) based on the study designs: {Confidence.get_description()}.\n"
-            "3. A 'Process' section describing the analysis process.\n"
-            "4. A 'Regression Models' section showing the models produced.\n"
-            "5. A 'Plots' section describing any corresponding plots.\n"
+            f"1. A one-sentence 'Summary' of the final conclusion.\n"
+            f"2. A 'Confidence' level (GREEN, YELLOW, or RED) based on the study designs: {confidence_description}.\n"
+            f"3. A 'Process' section describing the analysis process.\n"
+            f"4. A 'Regression Models' section showing the models produced.\n"
+            f"5. A 'Plots' section describing any corresponding plots.\n"
             "Write the response in clear, simple text. Do not use JSON.")
 
 def _compose_json_formatting_query(raw_analysis_text: str) -> str:
