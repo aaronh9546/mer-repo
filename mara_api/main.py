@@ -63,8 +63,6 @@ async def check_internal_secret(internal_secret: str = Security(api_key_header))
 
 # --- Application Setup ---
 
-# NOTE: In a production environment, this in-memory dictionary should be replaced
-# with a persistent store like Redis or a database to handle multiple server instances.
 chat_sessions = {}
 
 client = None
@@ -96,7 +94,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- NEW: Pydantic Models for Batching Architecture ---
+# --- Pydantic Models ---
 
 class InitialQuery(BaseModel):
     message: str
@@ -139,22 +137,14 @@ class AnalysisResponse(BaseModel):
     confidence: Confidence
     details: AnalysisDetails
 
-# --- NEW: Batching API Endpoints ---
+# --- Batching API Endpoints ---
 
 @app.post("/find-studies", response_model=FindStudiesResponse)
 async def find_studies_api(query: InitialQuery, current_user: User = Depends(get_current_user)):
-    """
-    Step 1: Kicks off the process. Takes the user's query, finds relevant studies,
-    creates a session, and returns the list of studies for the frontend to process.
-    """
     session_id = str(uuid.uuid4())
     print(f"Starting new session {session_id} for user {current_user.email}")
-
     raw_studies_text = await _get_studies_list(query.message)
-    
-    # Clean up the raw text into a proper list of strings
     studies_list = [re.sub(r'^\d+\.\s*', '', line).strip() for line in raw_studies_text.strip().split('\n') if line.strip()]
-
     chat_sessions[session_id] = {
         "user_id": current_user.id,
         "original_query": query.message,
@@ -166,54 +156,34 @@ async def find_studies_api(query: InitialQuery, current_user: User = Depends(get
 
 @app.post("/extract-single-study", response_model=ExtractedData)
 async def extract_single_study_api(request: ExtractRequest, current_user: User = Depends(get_current_user)):
-    """
-    Step 2: Called in a loop by the frontend for each study. Extracts data
-    for a single study title. This is a small, fast, and reliable operation.
-    """
     session = chat_sessions.get(request.session_id)
     if not session or session["user_id"] != current_user.id:
         raise HTTPException(status_code=404, detail="Session not found or access denied.")
-    
     print(f"Extracting data for '{request.study_title[:50]}...' in session {request.session_id}")
     extracted_data = await _extract_single_study_data(request.study_title)
-    
-    # Optionally store the incrementally extracted data in the session
-    # session["collected_data"].append(extracted_data.model_dump())
-    
     return extracted_data
     
 @app.post("/analyze-data", response_model=AnalysisResponse)
 async def analyze_data_api(request: AnalyzeRequest, current_user: User = Depends(get_current_user)):
-    """
-    Step 3: Called once by the frontend after all data has been extracted.
-    Takes the complete dataset and performs the final meta-analysis.
-    """
     session = chat_sessions.get(request.session_id)
     if not session or session["user_id"] != current_user.id:
         raise HTTPException(status_code=404, detail="Session not found or access denied.")
-
     print(f"Analyzing collected data for session {request.session_id}")
-    
-    # Convert the collected JSON data into the markdown table format that the analysis step expects
     markdown_table = "| Study | Treatment N | Comparison N | Effect Size | Design |\n"
     markdown_table += "|---|---|---|---|---|\n"
     for item in request.collected_data:
         markdown_table += f"| {item.study} | {item.treatment_n} | {item.comparison_n} | {item.effect_size} | {item.design} |\n"
-
     analysis_result = await _analyze_studies_from_data(markdown_table)
-    
     session['status'] = 'complete'
     session['analysis'] = analysis_result.model_dump()
-    
     return analysis_result
 
-# --- Authentication Endpoint (Unchanged) ---
+# --- Authentication Endpoint ---
 
 @app.post("/auth/issue-wordpress-token")
 async def issue_wordpress_token(user: User, internal_secret: str = Security(api_key_header)):
     if internal_secret != INTERNAL_SECRET_KEY:
         raise HTTPException(status_code=403, detail="Invalid secret key for internal communication")
-    
     print(f"Issuing token for WordPress user: {user.email} (ID: {user.id})")
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
@@ -225,13 +195,10 @@ async def issue_wordpress_token(user: User, internal_secret: str = Security(api_
 # --- Core Logic and Prompt Composition ---
 
 def _compose_find_studies_query(user_query: str) -> str:
-    return (
-        f"{common_persona_prompt}\n"
-        f"Find me up to 30 high-quality studies about: {user_query}\n"
-        "Exclude purely correlational studies or those without a control group.\n"
-        "Return the results as a simple numbered list with 'Title, Authors, Date Published.'\n"
-        "Do not include any other text, conversation, or explanations."
-    )
+    return (f"{common_persona_prompt}\nFind me up to 30 high-quality studies about: {user_query}\n"
+            "Exclude purely correlational studies or those without a control group.\n"
+            "Return the results as a simple numbered list with 'Title, Authors, Date Published.'\n"
+            "Do not include any other text, conversation, or explanations.")
 
 async def _get_studies_list(user_query: str) -> str:
     prompt = _compose_find_studies_query(user_query)
@@ -239,18 +206,15 @@ async def _get_studies_list(user_query: str) -> str:
     return response.text
 
 def _compose_extract_one_query(study_title: str) -> str:
-    return (
-        f"{common_persona_prompt}\n"
-        f"For the single academic study titled '{study_title}', your task is to extract its key data points. "
-        "If you cannot find the exact paper, generate realistic and plausible data based on the title.\n"
-        "You MUST return a single, raw JSON object with the following keys:\n"
-        "- `study`: A short name for the study (e.g., 'Author et al. (Year)').\n"
-        "- `treatment_n`: An integer representing the treatment group sample size.\n"
-        "- `comparison_n`: An integer representing the comparison group sample size.\n"
-        "- `effect_size`: A float representing the standardized mean difference.\n"
-        "- `design`: A string, either 'Randomized Controlled Trial' or 'Quasi-Experimental'.\n"
-        "CRITICAL: Your entire response must be ONLY the JSON object, with no other text, markdown, or explanation."
-    )
+    return (f"{common_persona_prompt}\nFor the single academic study titled '{study_title}', your task is to extract its key data points. "
+            "If you cannot find the exact paper, generate realistic and plausible data based on the title.\n"
+            "You MUST return a single, raw JSON object with the following keys:\n"
+            "- `study`: A short name for the study (e.g., 'Author et al. (Year)').\n"
+            "- `treatment_n`: An integer representing the treatment group sample size.\n"
+            "- `comparison_n`: An integer representing the comparison group sample size.\n"
+            "- `effect_size`: A float representing the standardized mean difference.\n"
+            "- `design`: A string, either 'Randomized Controlled Trial' or 'Quasi-Experimental'.\n"
+            "CRITICAL: Your entire response must be ONLY the JSON object, with no other text, markdown, or explanation.")
 
 async def _extract_single_study_data(study_title: str) -> ExtractedData:
     prompt = _compose_extract_one_query(study_title)
@@ -258,39 +222,63 @@ async def _extract_single_study_data(study_title: str) -> ExtractedData:
     try:
         response = await client.generate_content_async(prompt, generation_config=generation_config)
         return ExtractedData.model_validate_json(response.text)
-    except (ValidationError, json.JSONDecodeError, Exception) as e:
+    except Exception as e:
         print(f"🔴 Failed to extract valid JSON for '{study_title}'. Error: {e}. Returning placeholder data.")
-        # Return a placeholder on failure so the entire frontend process doesn't stop
-        return ExtractedData(
-            study=f"{study_title[:30]}... (Error)",
-            treatment_n=0,
-            comparison_n=0,
-            effect_size=0.0,
-            design="Extraction Failed"
-        )
+        return ExtractedData(study=f"{study_title[:30]}... (Error)", treatment_n=0, comparison_n=0, effect_size=0.0, design="Extraction Failed")
         
-def _compose_analyze_query(data_table: str) -> str:
-    return (
-        f"{common_persona_prompt}\n"
-        f"Using this dataset:\n{data_table}\n"
-        "IMPORTANT: You must return a valid JSON object that strictly adheres to the provided schema.\n"
-        "1. Perform a meta-analysis using a multivariate meta-regression model.\n"
-        "2. Determine the 'confidence' level based on the study designs: {Confidence.get_description()}\n"
-        "3. Write a one or two sentence 'summary' of the conclusion.\n"
-        "4. The JSON output MUST include a 'details' object containing 'process', 'regression_models', and 'plots' fields."
-    )
+def _compose_analyze_query(data_table: str, correction: str = None) -> str:
+    # MODIFIED: Added a 'correction' parameter for the retry logic
+    base_prompt = (f"{common_persona_prompt}\nUsing this dataset:\n{data_table}\n"
+                   "IMPORTANT: You must return a valid JSON object that strictly adheres to the provided schema.\n"
+                   "1. Perform a meta-analysis using a multivariate meta-regression model.\n"
+                   "2. Determine the 'confidence' level based on the study designs: {Confidence.get_description()}\n"
+                   "3. Write a one or two sentence 'summary' of the conclusion.\n"
+                   "4. The JSON output MUST include a 'details' object containing 'process', 'regression_models', and 'plots' fields.")
+    if correction:
+        return f"{correction}\n\nPlease regenerate the entire, corrected JSON response based on the original request:\n{base_prompt}"
+    return base_prompt
 
 async def _analyze_studies_from_data(data_table: str, max_retries: int = 2) -> AnalysisResponse:
-    prompt = _compose_analyze_query(data_table)
+    # --- MODIFIED: This function now contains the smarter retry logic ---
     generation_config = genai.types.GenerationConfig(
         response_mime_type="application/json",
         response_schema=AnalysisResponse,
     )
+    
+    last_error = None
+    correction_instruction = None
+
     for attempt in range(max_retries + 1):
+        prompt = _compose_analyze_query(data_table, correction=correction_instruction)
+        
         try:
+            print(f"--- Analysis Attempt {attempt + 1}/{max_retries + 1} ---")
             response = await client.generate_content_async(prompt, generation_config=generation_config)
             return AnalysisResponse.model_validate_json(response.text)
-        except (ValidationError, Exception) as e:
-            print(f"🔴 Analysis failed on attempt {attempt + 1}. Error: {e}")
-            if attempt >= max_retries:
-                raise HTTPException(status_code=500, detail=f"Failed to analyze data after retries. Last error: {e}")
+        
+        except ValidationError as e:
+            last_error = e
+            print(f"🔴 Analysis failed on attempt {attempt + 1} with validation error.")
+            
+            # This is the "smarter" part: find out exactly what was wrong.
+            missing_fields = []
+            for error in e.errors():
+                if error['type'] == 'missing':
+                    # error['loc'] gives a tuple of the path, e.g., ('details', 'plots')
+                    field_path = ".".join(map(str, error['loc']))
+                    missing_fields.append(f"`{field_path}`")
+            
+            if missing_fields:
+                correction_instruction = (f"Your previous JSON response was invalid because it was missing the following required field(s): "
+                                          f"{', '.join(missing_fields)}. You MUST include these fields in your next response.")
+            else:
+                # If it's a different validation error (e.g., wrong data type)
+                correction_instruction = f"Your previous JSON was invalid. Please fix the structure and try again. Error: {e}"
+        
+        except Exception as e:
+            last_error = e
+            print(f"🔴 Analysis failed on attempt {attempt + 1} with a general error: {e}")
+            correction_instruction = f"Your previous response caused a server error: {e}. Please generate a valid JSON response."
+
+    # If the loop finishes, all retries have failed
+    raise HTTPException(status_code=500, detail=f"Failed to analyze data after retries. Last error: {last_error}")
