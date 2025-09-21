@@ -12,12 +12,13 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from jose import JWTError, jwt
 import re
+from typing import Optional
 
 # --- Security and Authentication Setup ---
 
 INTERNAL_SECRET_KEY = os.getenv("INTERNAL_SECRET_KEY", "YOUR_SUPER_SECRET_PRE_SHARED_KEY")
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "a_different_strong_secret_for_jwt")
-ALGORITHM = "HS256"
+ALGORITHM = "HS26"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7 # 1 week expiration for tokens
 
 class User(BaseModel):
@@ -130,7 +131,7 @@ class Confidence(enum.Enum):
 class AnalysisDetails(BaseModel):
     regression_models: str
     process: str
-    plots: str
+    plots: Optional[str] = None
 
 class AnalysisResponse(BaseModel):
     summary: str
@@ -146,11 +147,8 @@ async def find_studies_api(query: InitialQuery, current_user: User = Depends(get
     raw_studies_text = await _get_studies_list(query.message)
     studies_list = [re.sub(r'^\d+\.\s*', '', line).strip() for line in raw_studies_text.strip().split('\n') if line.strip()]
     chat_sessions[session_id] = {
-        "user_id": current_user.id,
-        "original_query": query.message,
-        "studies_list": studies_list,
-        "collected_data": [],
-        "status": "pending"
+        "user_id": current_user.id, "original_query": query.message,
+        "studies_list": studies_list, "status": "pending"
     }
     return FindStudiesResponse(session_id=session_id, studies=studies_list)
 
@@ -160,8 +158,7 @@ async def extract_single_study_api(request: ExtractRequest, current_user: User =
     if not session or session["user_id"] != current_user.id:
         raise HTTPException(status_code=404, detail="Session not found or access denied.")
     print(f"Extracting data for '{request.study_title[:50]}...' in session {request.session_id}")
-    extracted_data = await _extract_single_study_data(request.study_title)
-    return extracted_data
+    return await _extract_single_study_data(request.study_title)
     
 @app.post("/analyze-data", response_model=AnalysisResponse)
 async def analyze_data_api(request: AnalyzeRequest, current_user: User = Depends(get_current_user)):
@@ -169,8 +166,7 @@ async def analyze_data_api(request: AnalyzeRequest, current_user: User = Depends
     if not session or session["user_id"] != current_user.id:
         raise HTTPException(status_code=404, detail="Session not found or access denied.")
     print(f"Analyzing collected data for session {request.session_id}")
-    markdown_table = "| Study | Treatment N | Comparison N | Effect Size | Design |\n"
-    markdown_table += "|---|---|---|---|---|\n"
+    markdown_table = "| Study | Treatment N | Comparison N | Effect Size | Design |\n|---|---|---|---|---|\n"
     for item in request.collected_data:
         markdown_table += f"| {item.study} | {item.treatment_n} | {item.comparison_n} | {item.effect_size} | {item.design} |\n"
     analysis_result = await _analyze_studies_from_data(markdown_table)
@@ -196,9 +192,8 @@ async def issue_wordpress_token(user: User, internal_secret: str = Security(api_
 
 def _compose_find_studies_query(user_query: str) -> str:
     return (f"{common_persona_prompt}\nFind me up to 30 high-quality studies about: {user_query}\n"
-            "Exclude purely correlational studies or those without a control group.\n"
             "Return the results as a simple numbered list with 'Title, Authors, Date Published.'\n"
-            "Do not include any other text, conversation, or explanations.")
+            "Do not include any other text.")
 
 async def _get_studies_list(user_query: str) -> str:
     prompt = _compose_find_studies_query(user_query)
@@ -206,15 +201,14 @@ async def _get_studies_list(user_query: str) -> str:
     return response.text
 
 def _compose_extract_one_query(study_title: str) -> str:
-    return (f"{common_persona_prompt}\nFor the single academic study titled '{study_title}', your task is to extract its key data points. "
-            "If you cannot find the exact paper, generate realistic and plausible data based on the title.\n"
+    return (f"{common_persona_prompt}\nFor the study titled '{study_title}', generate realistic data based on the title.\n"
             "You MUST return a single, raw JSON object with the following keys:\n"
             "- `study`: A short name for the study (e.g., 'Author et al. (Year)').\n"
-            "- `treatment_n`: An integer representing the treatment group sample size.\n"
-            "- `comparison_n`: An integer representing the comparison group sample size.\n"
-            "- `effect_size`: A float representing the standardized mean difference.\n"
+            "- `treatment_n`: An integer for the treatment group size.\n"
+            "- `comparison_n`: An integer for the comparison group size.\n"
+            "- `effect_size`: A float for the standardized mean difference.\n"
             "- `design`: A string, either 'Randomized Controlled Trial' or 'Quasi-Experimental'.\n"
-            "CRITICAL: Your entire response must be ONLY the JSON object, with no other text, markdown, or explanation.")
+            "CRITICAL: Your entire response must be ONLY the JSON object.")
 
 async def _extract_single_study_data(study_title: str) -> ExtractedData:
     prompt = _compose_extract_one_query(study_title)
@@ -223,62 +217,56 @@ async def _extract_single_study_data(study_title: str) -> ExtractedData:
         response = await client.generate_content_async(prompt, generation_config=generation_config)
         return ExtractedData.model_validate_json(response.text)
     except Exception as e:
-        print(f"🔴 Failed to extract valid JSON for '{study_title}'. Error: {e}. Returning placeholder data.")
+        print(f"🔴 Failed to extract valid JSON for '{study_title}'. Error: {e}. Returning placeholder.")
         return ExtractedData(study=f"{study_title[:30]}... (Error)", treatment_n=0, comparison_n=0, effect_size=0.0, design="Extraction Failed")
-        
-def _compose_analyze_query(data_table: str, correction: str = None) -> str:
-    # MODIFIED: Added a 'correction' parameter for the retry logic
-    base_prompt = (f"{common_persona_prompt}\nUsing this dataset:\n{data_table}\n"
-                   "IMPORTANT: You must return a valid JSON object that strictly adheres to the provided schema.\n"
-                   "1. Perform a meta-analysis using a multivariate meta-regression model.\n"
-                   "2. Determine the 'confidence' level based on the study designs: {Confidence.get_description()}\n"
-                   "3. Write a one or two sentence 'summary' of the conclusion.\n"
-                   "4. The JSON output MUST include a 'details' object containing 'process', 'regression_models', and 'plots' fields.")
-    if correction:
-        return f"{correction}\n\nPlease regenerate the entire, corrected JSON response based on the original request:\n{base_prompt}"
-    return base_prompt
 
-async def _analyze_studies_from_data(data_table: str, max_retries: int = 2) -> AnalysisResponse:
-    # --- MODIFIED: This function now contains the smarter retry logic ---
-    generation_config = genai.types.GenerationConfig(
-        response_mime_type="application/json",
-        response_schema=AnalysisResponse,
-    )
-    
-    last_error = None
-    correction_instruction = None
+# --- MODIFIED: New two-call analysis logic ---
 
-    for attempt in range(max_retries + 1):
-        prompt = _compose_analyze_query(data_table, correction=correction_instruction)
-        
-        try:
-            print(f"--- Analysis Attempt {attempt + 1}/{max_retries + 1} ---")
-            response = await client.generate_content_async(prompt, generation_config=generation_config)
-            return AnalysisResponse.model_validate_json(response.text)
-        
-        except ValidationError as e:
-            last_error = e
-            print(f"🔴 Analysis failed on attempt {attempt + 1} with validation error.")
-            
-            # This is the "smarter" part: find out exactly what was wrong.
-            missing_fields = []
-            for error in e.errors():
-                if error['type'] == 'missing':
-                    # error['loc'] gives a tuple of the path, e.g., ('details', 'plots')
-                    field_path = ".".join(map(str, error['loc']))
-                    missing_fields.append(f"`{field_path}`")
-            
-            if missing_fields:
-                correction_instruction = (f"Your previous JSON response was invalid because it was missing the following required field(s): "
-                                          f"{', '.join(missing_fields)}. You MUST include these fields in your next response.")
-            else:
-                # If it's a different validation error (e.g., wrong data type)
-                correction_instruction = f"Your previous JSON was invalid. Please fix the structure and try again. Error: {e}"
-        
-        except Exception as e:
-            last_error = e
-            print(f"🔴 Analysis failed on attempt {attempt + 1} with a general error: {e}")
-            correction_instruction = f"Your previous response caused a server error: {e}. Please generate a valid JSON response."
+def _compose_raw_analysis_query(data_table: str) -> str:
+    """Prompt for the first call: just do the analysis and return plain text."""
+    return (f"{common_persona_prompt}\nUsing this dataset:\n{data_table}\n"
+            "Perform a meta-analysis. In your response, you must include sections covering these four topics:\n"
+            "1. A one-sentence 'Summary' of the final conclusion.\n"
+            "2. A 'Confidence' level (GREEN, YELLOW, or RED) based on the study designs: {Confidence.get_description()}.\n"
+            "3. A 'Process' section describing the analysis process.\n"
+            "4. A 'Regression Models' section showing the models produced.\n"
+            "5. A 'Plots' section describing any corresponding plots.\n"
+            "Write the response in clear, simple text. Do not use JSON.")
 
-    # If the loop finishes, all retries have failed
-    raise HTTPException(status_code=500, detail=f"Failed to analyze data after retries. Last error: {last_error}")
+def _compose_json_formatting_query(raw_analysis_text: str) -> str:
+    """Prompt for the second call: just format the text from the first call into JSON."""
+    return (f"Take the following text-based analysis and convert it into a valid JSON object. "
+            f"The JSON object must strictly adhere to the required schema. The root object must have keys 'summary', 'confidence', and 'details'. "
+            f"The 'details' object must contain the keys 'process', 'regression_models', and 'plots'.\n\n"
+            f"--- TEXT TO CONVERT ---\n{raw_analysis_text}\n\n"
+            f"--- END TEXT --- \n\n"
+            f"Now, provide only the JSON object.")
+
+async def _analyze_studies_from_data(data_table: str) -> AnalysisResponse:
+    """
+    Performs analysis in two steps to ensure reliable JSON output:
+    1. Generate a raw text analysis.
+    2. Format the raw text into the required JSON structure.
+    """
+    try:
+        # Step 1: Get the raw analysis in plain text
+        print("--- Analysis Step 1: Generating raw text analysis ---")
+        raw_analysis_prompt = _compose_raw_analysis_query(data_table)
+        raw_response = await client.generate_content_async(raw_analysis_prompt)
+        print("--- Analysis Step 1 Complete ---")
+
+        # Step 2: Format the raw text into JSON
+        print("--- Analysis Step 2: Formatting text into JSON ---")
+        json_format_prompt = _compose_json_formatting_query(raw_response.text)
+        generation_config = genai.types.GenerationConfig(
+            response_mime_type="application/json",
+            response_schema=AnalysisResponse,
+        )
+        json_response = await client.generate_content_async(json_format_prompt, generation_config=generation_config)
+        print("--- Analysis Step 2 Complete ---")
+        
+        return AnalysisResponse.model_validate_json(json_response.text)
+
+    except Exception as e:
+        print(f"🔴 A critical error occurred during the two-step analysis process: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed during the analysis and formatting steps. Last error: {e}")
