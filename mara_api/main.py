@@ -19,12 +19,6 @@ JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "a_different_strong_secret_for_jwt"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7 # 1 week expiration for tokens
 
-# --- Mock Database for Users ---
-# In a real application, this would be a real database (e.g., PostgreSQL, MongoDB).
-# This dictionary will store users received from WordPress.
-fake_user_db = {}
-
-
 class TokenData(BaseModel):
     user_id: int | None = None
 
@@ -62,8 +56,6 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
     except (JWTError, ValueError, TypeError):
         raise credentials_exception
     
-    # In a real app, you might re-verify the user against the database here.
-    # For this app, we trust the JWT claims.
     user = User(id=user_id, email=email, name=name)
     return user
 
@@ -82,7 +74,7 @@ class CustomEncoder(json.JSONEncoder):
         return super().default(obj)
 
 client = None
-gemini_model = "gemini-1.5-pro" # Updated to a more recent model
+gemini_model = "gemini-1.5-pro"
 common_persona_prompt = "You are a senior data analyst with a specialty in meta-analysis."
 app = FastAPI()
 
@@ -129,9 +121,9 @@ class Confidence(enum.Enum):
     @staticmethod
     def get_description():
         return (
-            "GREEN - If the research on the topic has a well-conducted, randomized study showing a statistically significant positive effect on at least one outcome measure (e.g., state test or national standardized test) analyzed at the proper level of clustering (class/school or student) with a multi-site sample of at least 350 participants. Strong evidence from at least one well-designed and wellimplemented experimental study. Experimental studies were used to answer this question. Experimental studies are those in which students are randomly assigned to treatment or control groups, allowing researchers to speak with confidence about the likelihood that an intervention causes an outcome. Well-designed and well implemented experimental studies. The research studies use large (larger than 350 participants), multi-site samples. No other experimental or quasiexperimental research shows that the intervention negatively affects the outcome. Researchers have found that the intervention improves outcomes for the specific student subgroups that the district or school intends to support with the intervention."
-            + "\nYELLOW - If it meets all standards for “green” stated above, except that instead of using a randomized design, qualifying studies are prospective quasi-experiments (i.e., matched studies). Quasiexperimental studies (e.g., Regression Discontinuity Design) are those in which students have not been randomly assigned to treatment or control groups, but researchers are using statistical matching methods that allow them to speak with confidence about the likelihood that an intervention causes an outcome. The research studies use large, multi-site samples. No other experimental or quasiexperimental research shows that the intervention negatively affects the outcome. Researchers have found that the intervention improves outcomes for the specific student subgroups that the district or school intends to support with the intervention."
-            + "\nRED - The topic has a study that would have qualified for “green” or “yellow” but did not because it failed to account for clustering (but did obtain significantly positive outcomes at the student level) or did not meet the sample size requirements. Post-hoc or retrospective studies may also qualify. Correlational studies (e.g., studies that can show a relationship between the intervention and outcome but cannot show causation) have found that the intervention likely improves a relevant student outcome (e.g., reading scores, attendance rates). The studies do not have to be based on large, multi-site samples. No other experimental or quasiexperimental research shows that the intervention negatively affects the outcome."
+            "GREEN - If the research on the topic has a well-conducted, randomized study showing a statistically significant positive effect on at least one outcome measure (e.g., state test or national standardized test) analyzed at the proper level of clustering (class/school or student) with a multi-site sample of at least 350 participants. Strong evidence from at least one well-designed and wellimplemented experimental study."
+            + "\nYELLOW - If it meets all standards for “green” stated above, except that instead of using a randomized design, qualifying studies are prospective quasi-experiments (i.e., matched studies). Quasiexperimental studies (e.g., Regression Discontinuity Design) are those in which students have not been randomly assigned to treatment or control groups, but researchers are using statistical matching methods that allow them to speak with confidence about the likelihood that an intervention causes an outcome."
+            + "\nRED - The topic has a study that would have qualified for “green” or “yellow” but did not because it failed to account for clustering (but did obtain significantly positive outcomes at the student level) or did not meet the sample size requirements. Post-hoc or retrospective studies may also qualify."
         )
 
 class AnalysisDetails(BaseModel):
@@ -149,36 +141,12 @@ class AnalysisResponse(BaseModel):
 @app.post("/auth/issue-wordpress-token", dependencies=[Depends(check_internal_secret)])
 async def issue_wordpress_token(user: User):
     """
-    Receives user data from WordPress, creates the user if they don't exist,
-    and returns a JWT access token.
+    Receives user data from WordPress (validated by the internal secret)
+    and returns a JWT access token for the chatbot API.
     """
-    # --- MODIFIED SECTION START ---
-    
-    # Check if user exists in our database by email.
-    if user.email not in fake_user_db:
-        # If user does not exist, create them (just-in-time provisioning).
-        print(f"User '{user.email}' not found. Creating new user.")
-        fake_user_db[user.email] = {
-            "id": user.id,
-            "email": user.email,
-            "name": user.name
-        }
-    else:
-        # Optionally, update user details if they already exist.
-        print(f"User '{user.email}' found. Issuing token.")
-        fake_user_db[user.email].update({
-            "id": user.id, # WordPress might have a different ID, update it.
-            "name": user.name
-        })
-
-    # The user object from the request is trusted because the request was authenticated
-    # with the shared internal secret key.
-    
-    # --- MODIFIED SECTION END ---
-
+    print(f"Issuing token for WordPress user: {user.email} (ID: {user.id})")
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     
-    # Create the token with the data received from WordPress.
     access_token = create_access_token(
         data={"sub": str(user.id), "email": user.email, "name": user.name},
         expires_delta=access_token_expires,
@@ -346,8 +314,7 @@ def compose_step_two_query(step_1_result: str) -> str:
         + "\n2. Cluster sample sizes (i.e. size of the classroom or school of however the individuals are clustered)"
         + "\n3. Intraclass correlation coefficient (ICC; when available) will be coded for cluster studies. When the ICC estimates are not provided, impute a constant value of 0.20."
         + "\n4. Effect size for each outcome analysis will be calculated and recorded. These should be the standardized mean difference between the treatment and control group at post-test, ideally adjusted for pre-test differences."
-        + "\nAuthors can report this in varying ways. The preference is for adjusted effects, found in a linear regression. If adjusted effects are unavailable, raw means and standard deviations can be used."
-        + "\n6. Study design (i.e., randomized controlled trial, quasi-experimental, or regression discontinuity)"
+        + "\n5. Study design (i.e., randomized controlled trial, quasi-experimental, or regression discontinuity)"
         + "\nReturn the results in a spreadsheet, where each row is for each study and each column is for each column feature in the above list."
         + "\nKeep your response brief, only including those spreadsheet rows and nothing more."
     )
@@ -370,12 +337,20 @@ async def analyze_studies(step_2_result: str) -> AnalysisResponse:
         raise ValueError(f"Step 3 failed because the API did not return valid JSON. Error: {e}")
 
 def compose_step_three_query(step_2_result: str) -> str:
+    """
+    Asks the model to perform the final analysis and return a structured JSON object.
+    This version includes a more explicit instruction for the nested 'details' object
+    to prevent Pydantic validation errors.
+    """
+    # --- MODIFIED PROMPT ---
     return (
         common_persona_prompt
         + "\nUsing this dataset: " + step_2_result
-        + "\ncreate a simple model with only the impact of the main predictor of interest. Specifically, use a multivariate meta-regression model to conduct the meta-analysis."
-        + "\nDetermine the Confidence level per the following criteria: " + Confidence.get_description()
-        + "\nReturn this in the Confidence enum."
-        + "\nGenerate an overview summarizing the analysis conclusion, in one or two sentences. Return this in the response Summary."
-        + "\nInclude all other details in the response Details, making sure to include a description of the analysis process used, the regression models produced, and any correpsonding plots, in the corresponding AnalysisDetails fields."
+        + "\n1. Perform a meta-analysis using a multivariate meta-regression model."
+        + "\n2. Determine the 'confidence' level (GREEN, YELLOW, or RED) based on these criteria: " + Confidence.get_description()
+        + "\n3. Write a one or two sentence 'summary' of the conclusion."
+        + "\n4. The final JSON output must include a 'details' object. Inside this 'details' object, you must provide:"
+        + "\n   - A 'process' field describing the analysis process."
+        + "\n   - A 'regression_models' field showing the regression models produced."
+        + "\n   - A 'plots' field describing any corresponding plots."
     )
