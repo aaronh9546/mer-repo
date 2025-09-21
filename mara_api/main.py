@@ -14,6 +14,9 @@ from jose import JWTError, jwt
 import re
 from typing import Optional
 
+# STEP 1: VERIFICATION PRINT STATEMENT
+print("--- RUNNING LATEST VERSION WITH ENUM FIX: SEPTEMBER 21 ---")
+
 # --- Security and Authentication Setup ---
 
 INTERNAL_SECRET_KEY = os.getenv("INTERNAL_SECRET_KEY", "YOUR_SUPER_SECRET_PRE_SHARED_KEY")
@@ -41,8 +44,7 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None):
 
 async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
     credentials_exception = HTTPException(
-        status_code=401,
-        detail="Could not validate credentials",
+        status_code=401, detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
@@ -63,9 +65,7 @@ async def check_internal_secret(internal_secret: str = Security(api_key_header))
         raise HTTPException(status_code=403, detail="Invalid secret key for internal communication")
 
 # --- Application Setup ---
-
 chat_sessions = {}
-
 client = None
 gemini_model = "gemini-1.5-pro"
 common_persona_prompt = "You are a senior data analyst with a specialty in meta-analysis."
@@ -82,21 +82,15 @@ async def startup_event():
     print("✅ GenAI Client configured and initialized successfully.")
 
 origins = [
-    "https://myeducationresearcher.com",
-    "https://timothy-han.com",
-    "https://jsdean1517-pdkfw.wpcomstaging.com",
-    "http://localhost:3000",
+    "https://myeducationresearcher.com", "https://timothy-han.com",
+    "https://jsdean1517-pdkfw.wpcomstaging.com", "http://localhost:3000",
 ]
 app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    CORSMiddleware, allow_origins=origins, allow_credentials=True,
+    allow_methods=["*"], allow_headers=["*"],
 )
 
 # --- Pydantic Models ---
-
 class InitialQuery(BaseModel):
     message: str
 
@@ -119,12 +113,6 @@ class AnalyzeRequest(BaseModel):
     session_id: str
     collected_data: list[ExtractedData]
 
-# MODIFICATION: Removed the @staticmethod from the Enum to fix the schema error.
-class Confidence(enum.Enum):
-    GREEN = "GREEN"
-    YELLOW = "YELLOW"
-    RED = "RED"
-
 class AnalysisDetails(BaseModel):
     regression_models: str
     process: str
@@ -132,11 +120,11 @@ class AnalysisDetails(BaseModel):
 
 class AnalysisResponse(BaseModel):
     summary: str
-    confidence: Confidence
+    # STEP 2: SIMPLIFIED THE SCHEMA. Replaced the Enum with a simple string.
+    confidence: str 
     details: AnalysisDetails
 
 # --- Batching API Endpoints ---
-
 @app.post("/find-studies", response_model=FindStudiesResponse)
 async def find_studies_api(query: InitialQuery, current_user: User = Depends(get_current_user)):
     session_id = str(uuid.uuid4())
@@ -172,7 +160,6 @@ async def analyze_data_api(request: AnalyzeRequest, current_user: User = Depends
     return analysis_result
 
 # --- Authentication Endpoint ---
-
 @app.post("/auth/issue-wordpress-token")
 async def issue_wordpress_token(user: User, internal_secret: str = Security(api_key_header)):
     if internal_secret != INTERNAL_SECRET_KEY:
@@ -186,7 +173,6 @@ async def issue_wordpress_token(user: User, internal_secret: str = Security(api_
     return {"access_token": access_token, "token_type": "bearer"}
 
 # --- Core Logic and Prompt Composition ---
-
 def _compose_find_studies_query(user_query: str) -> str:
     return (f"{common_persona_prompt}\nFind me up to 30 high-quality studies about: {user_query}\n"
             "Return the results as a simple numbered list with 'Title, Authors, Date Published.'\n"
@@ -218,41 +204,32 @@ async def _extract_single_study_data(study_title: str) -> ExtractedData:
         return ExtractedData(study=f"{study_title[:30]}... (Error)", treatment_n=0, comparison_n=0, effect_size=0.0, design="Extraction Failed")
 
 def _compose_raw_analysis_query(data_table: str) -> str:
-    """Prompt for the first call: just do the analysis and return plain text."""
-    # MODIFICATION: The confidence description is now hardcoded here instead of in the Enum.
     confidence_description = "GREEN for strong experimental evidence, YELLOW for strong quasi-experimental evidence, RED for correlational or weaker evidence."
     return (f"{common_persona_prompt}\nUsing this dataset:\n{data_table}\n"
-            "Perform a meta-analysis. In your response, you must include sections covering these four topics:\n"
-            f"1. A one-sentence 'Summary' of the final conclusion.\n"
-            f"2. A 'Confidence' level (GREEN, YELLOW, or RED) based on the study designs: {confidence_description}.\n"
+            "Perform a meta-analysis. In your response, you must include sections covering these topics:\n"
+            f"1. A 'Summary' of the final conclusion.\n"
+            f"2. A 'Confidence' level (a single word: GREEN, YELLOW, or RED) based on: {confidence_description}.\n"
             f"3. A 'Process' section describing the analysis process.\n"
             f"4. A 'Regression Models' section showing the models produced.\n"
             f"5. A 'Plots' section describing any corresponding plots.\n"
             "Write the response in clear, simple text. Do not use JSON.")
 
 def _compose_json_formatting_query(raw_analysis_text: str) -> str:
-    """Prompt for the second call: just format the text from the first call into JSON."""
     return (f"Take the following text-based analysis and convert it into a valid JSON object. "
             f"The JSON object must strictly adhere to the required schema. The root object must have keys 'summary', 'confidence', and 'details'. "
+            f"The 'confidence' value must be a single string: 'GREEN', 'YELLOW', or 'RED'. " # Updated instruction for the formatter
             f"The 'details' object must contain the keys 'process', 'regression_models', and 'plots'.\n\n"
             f"--- TEXT TO CONVERT ---\n{raw_analysis_text}\n\n"
             f"--- END TEXT --- \n\n"
             f"Now, provide only the JSON object.")
 
 async def _analyze_studies_from_data(data_table: str) -> AnalysisResponse:
-    """
-    Performs analysis in two steps to ensure reliable JSON output:
-    1. Generate a raw text analysis.
-    2. Format the raw text into the required JSON structure.
-    """
     try:
-        # Step 1: Get the raw analysis in plain text
         print("--- Analysis Step 1: Generating raw text analysis ---")
         raw_analysis_prompt = _compose_raw_analysis_query(data_table)
         raw_response = await client.generate_content_async(raw_analysis_prompt)
         print("--- Analysis Step 1 Complete ---")
 
-        # Step 2: Format the raw text into JSON
         print("--- Analysis Step 2: Formatting text into JSON ---")
         json_format_prompt = _compose_json_formatting_query(raw_response.text)
         generation_config = genai.types.GenerationConfig(
@@ -263,7 +240,6 @@ async def _analyze_studies_from_data(data_table: str) -> AnalysisResponse:
         print("--- Analysis Step 2 Complete ---")
         
         return AnalysisResponse.model_validate_json(json_response.text)
-
     except Exception as e:
         print(f"🔴 A critical error occurred during the two-step analysis process: {e}")
         raise HTTPException(status_code=500, detail=f"Failed during the analysis and formatting steps. Last error: {e}")
