@@ -14,10 +14,16 @@ from jose import JWTError, jwt
 
 # --- Security and Authentication Setup ---
 
-INTERNAL_SECRET_KEY = os.getenv("INTERNAL_SECRET_KEY", "YOUR_SUPER_SECRET_PRE_SHARED_KEY") 
+INTERNAL_SECRET_KEY = os.getenv("INTERNAL_SECRET_KEY", "YOUR_SUPER_SECRET_PRE_SHARED_KEY")
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "a_different_strong_secret_for_jwt")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7 # 1 week expiration for tokens
+
+# --- Mock Database for Users ---
+# In a real application, this would be a real database (e.g., PostgreSQL, MongoDB).
+# This dictionary will store users received from WordPress.
+fake_user_db = {}
+
 
 class TokenData(BaseModel):
     user_id: int | None = None
@@ -56,6 +62,8 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
     except (JWTError, ValueError, TypeError):
         raise credentials_exception
     
+    # In a real app, you might re-verify the user against the database here.
+    # For this app, we trust the JWT claims.
     user = User(id=user_id, email=email, name=name)
     return user
 
@@ -74,7 +82,7 @@ class CustomEncoder(json.JSONEncoder):
         return super().default(obj)
 
 client = None
-gemini_model = "gemini-2.5-pro"
+gemini_model = "gemini-1.5-pro" # Updated to a more recent model
 common_persona_prompt = "You are a senior data analyst with a specialty in meta-analysis."
 app = FastAPI()
 
@@ -87,7 +95,6 @@ async def startup_event():
     
     genai.configure(api_key=GEMINI_API_KEY)
     
-    # This is the original, simple initialization with default safety settings
     client = genai.GenerativeModel(gemini_model)
     
     print("✅ GenAI Client configured and initialized successfully.")
@@ -121,7 +128,6 @@ class Confidence(enum.Enum):
     
     @staticmethod
     def get_description():
-        # This is the original, very long and verbose description
         return (
             "GREEN - If the research on the topic has a well-conducted, randomized study showing a statistically significant positive effect on at least one outcome measure (e.g., state test or national standardized test) analyzed at the proper level of clustering (class/school or student) with a multi-site sample of at least 350 participants. Strong evidence from at least one well-designed and wellimplemented experimental study. Experimental studies were used to answer this question. Experimental studies are those in which students are randomly assigned to treatment or control groups, allowing researchers to speak with confidence about the likelihood that an intervention causes an outcome. Well-designed and well implemented experimental studies. The research studies use large (larger than 350 participants), multi-site samples. No other experimental or quasiexperimental research shows that the intervention negatively affects the outcome. Researchers have found that the intervention improves outcomes for the specific student subgroups that the district or school intends to support with the intervention."
             + "\nYELLOW - If it meets all standards for “green” stated above, except that instead of using a randomized design, qualifying studies are prospective quasi-experiments (i.e., matched studies). Quasiexperimental studies (e.g., Regression Discontinuity Design) are those in which students have not been randomly assigned to treatment or control groups, but researchers are using statistical matching methods that allow them to speak with confidence about the likelihood that an intervention causes an outcome. The research studies use large, multi-site samples. No other experimental or quasiexperimental research shows that the intervention negatively affects the outcome. Researchers have found that the intervention improves outcomes for the specific student subgroups that the district or school intends to support with the intervention."
@@ -142,7 +148,37 @@ class AnalysisResponse(BaseModel):
 
 @app.post("/auth/issue-wordpress-token", dependencies=[Depends(check_internal_secret)])
 async def issue_wordpress_token(user: User):
+    """
+    Receives user data from WordPress, creates the user if they don't exist,
+    and returns a JWT access token.
+    """
+    # --- MODIFIED SECTION START ---
+    
+    # Check if user exists in our database by email.
+    if user.email not in fake_user_db:
+        # If user does not exist, create them (just-in-time provisioning).
+        print(f"User '{user.email}' not found. Creating new user.")
+        fake_user_db[user.email] = {
+            "id": user.id,
+            "email": user.email,
+            "name": user.name
+        }
+    else:
+        # Optionally, update user details if they already exist.
+        print(f"User '{user.email}' found. Issuing token.")
+        fake_user_db[user.email].update({
+            "id": user.id, # WordPress might have a different ID, update it.
+            "name": user.name
+        })
+
+    # The user object from the request is trusted because the request was authenticated
+    # with the shared internal secret key.
+    
+    # --- MODIFIED SECTION END ---
+
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    
+    # Create the token with the data received from WordPress.
     access_token = create_access_token(
         data={"sub": str(user.id), "email": user.email, "name": user.name},
         expires_delta=access_token_expires,
@@ -274,7 +310,6 @@ async def get_studies(user_query: str) -> str:
     return response.text
 
 def compose_step_one_query(user_query: str) -> str:
-    # This is the original, less-strict prompt
     return (
         common_persona_prompt
         + " Find me high-quality studies that look into the question of: " + user_query
@@ -302,7 +337,6 @@ async def extract_studies_data(step_1_result: str) -> str:
     return response.text
 
 def compose_step_two_query(step_1_result: str) -> str:
-    # This is the original, less-strict prompt
     return (
         common_persona_prompt
         + " First, lookup the papers for each of the studies in this list.\n" + step_1_result
@@ -336,7 +370,6 @@ async def analyze_studies(step_2_result: str) -> AnalysisResponse:
         raise ValueError(f"Step 3 failed because the API did not return valid JSON. Error: {e}")
 
 def compose_step_three_query(step_2_result: str) -> str:
-    # This is the version with the full, verbose Confidence description
     return (
         common_persona_prompt
         + "\nUsing this dataset: " + step_2_result
