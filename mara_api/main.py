@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
-from google import genai
+import google.generativeai as genai
 import os
 import enum
 
@@ -207,10 +207,4 @@ def compose_step_three_query(step_2_result: str) -> str:
         common_persona_prompt
         + "\nUsing this dataset: "
         + step_2_result
-        + "\ncreate a simple model with only the impact of the main predictor of interest. Specifically, use a multivariate meta-regression model to conduct the meta-analysis."
-        + "\nDetermine the Confidence level per the following criteria: "
-        + Confidence.get_description()
-        + "Return this in the Confidence enum."
-        + "\nGenerate an overview summarizing the analysis conclusion, in one or two sentences. Return this in the response Summary."
-        + "\nInclude all other details in the response Details, making sure to include a description of the analysis process used, the regression models produced, and any correpsonding plots, in the corresponding AnalysisDetails fields."
-    )
+        + "\ncreate a simple model with only the impact of the main predictor of interest. Specifically
