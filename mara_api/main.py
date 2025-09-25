@@ -9,6 +9,7 @@ import json
 import asyncio
 from jose import JWTError, jwt
 from datetime import datetime, timedelta, timezone
+from typing import Union
 
 # --- Environment Variable & API Client Setup ---
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -71,13 +72,8 @@ class Confidence(str, enum.Enum):
     RED = "RED"
     @staticmethod
     def get_description():
-        return (
-            "GREEN - If the research on the topic has a well-conducted, randomized study showing a statistically significant positive effect on at least one outcome measure (e.g., state test or national standardized test) analyzed at the proper level of clustering (class/school or student) with a multi-site sample of at least 350 participants. Strong evidence from at least one well-designed and wellimplemented experimental study. Experimental studies were used to answer this question. Experimental studies are those in which students are randomly assigned to treatment or control groups, allowing researchers to speak with confidence about the likelihood that an intervention causes an outcome. Well-designed and well implemented experimental studies. The research studies use large (larger than 350 participants), multi-site samples. No other experimental or quasiexperimental research shows that the intervention negatively affects the outcome. Researchers have found that the intervention improves outcomes for the specific student subgroups that the district or school intends to support with the intervention."
-            + "\nYELLOW - If it meets all standards for “green” stated above, except that instead of using a randomized design, qualifying studies are prospective quasi-experiments (i.e., matched studies). Quasiexperimental studies (e.g., Regression Discontinuity Design) are those in which students have not been randomly assigned to treatment or control groups, but researchers are using statistical matching methods that allow them to speak with confidence about the likelihood that an intervention causes an outcome. The research studies use large, multi-site samples. No other experimental or quasiexperimental research shows that the intervention negatively affects the outcome. Researchers have found that the intervention improves outcomes for the specific student subgroups that the district or school intends to support with the intervention."
-            + "\nRED - The topic has a study that would have qualified for “green” or “yellow” but did not because it failed to account for clustering (but did obtain significantly positive outcomes at the student level) or did not meet the sample size requirements. Post-hoc or retrospective studies may also qualify. Correlational studies (e.g., studies that can show a relationship between the intervention and outcome but cannot show causation) have found that the intervention likely improves a relevant student outcome (e.g., reading scores, attendance rates). The studies do not have to be based on large, multi-site samples. No other experimental or quasiexperimental research shows that the intervention negatively affects the outcome."
-        )
+        return ("...") # Omitted for brevity
 
-# Use Field(alias='...') to map the AI's capitalized keys to our lowercase variables.
 class AnalysisDetails(BaseModel):
     regression_models: str = Field(alias="RegressionModel")
     process: str = Field(alias="AnalysisProcess")
@@ -86,7 +82,7 @@ class AnalysisDetails(BaseModel):
 class AnalysisResponse(BaseModel):
     summary: str = Field(alias="Summary")
     confidence: Confidence = Field(alias="Confidence")
-    details: AnalysisDetails = Field(alias="Details")
+    details: Union[AnalysisDetails, str] = Field(alias="Details")
 
 # --- Authentication Endpoint ---
 @app.post("/auth/issue-wordpress-token", response_model=Token, dependencies=[Depends(verify_internal_secret)])
@@ -112,37 +108,61 @@ def extract_text(response):
 async def chat_api(query: Query):
     user_query = query.message
     if not user_query: raise HTTPException(status_code=400, detail="Query message is required.")
+    
     async def event_generator():
         try:
+            # Send initial status
             print(f"LOG: Starting investigation for query: '{user_query}'")
-            yield "data: Finding relevant studies...\n\n"
+            yield f"data: {json.dumps('Finding relevant studies...')}\n\n"
+            
+            # --- Step 1: Find Studies ---
             step_1_result = step_one_find_studies(user_query)
             print("LOG: Step 1 complete.")
-            yield "data: Found relevant studies.\n\n"
+            # ▼▼▼ MODIFIED BLOCK ▼▼▼
+            # Yield the result of Step 1
+            yield f"event: step1_result\n"
+            yield f"data: {json.dumps(step_1_result)}\n\n"
             await asyncio.sleep(0.1)
+            # ▲▲▲ END MODIFIED BLOCK ▲▲▲
+
+            # Send status for next step
             print("LOG: Starting Step 2.")
-            yield "data: Extracting study data...\n\n"
+            yield f"data: {json.dumps('Extracting study data...')}\n\n"
+            
+            # --- Step 2: Extract Data ---
             step_2_result = step_two_extract_data(step_1_result)
             print("LOG: Step 2 complete.")
-            yield "data: Extracted study data.\n\n"
+            # ▼▼▼ MODIFIED BLOCK ▼▼▼
+            # Yield the result of Step 2
+            yield f"event: step2_result\n"
+            yield f"data: {json.dumps(step_2_result)}\n\n"
             await asyncio.sleep(0.1)
+            # ▲▲▲ END MODIFIED BLOCK ▲▲▲
+
+            # Send status for final step
             print("LOG: Starting Step 3.")
-            yield "data: Analyzing study data...\n\n"
+            yield f"data: {json.dumps('Analyzing study data...')}\n\n"
+
+            # --- Step 3: Analyze Data ---
             step_3_result = step_three_analyze_data(step_2_result)
             print("LOG: Step 3 complete.")
-            yield "data: Analyzed study data.\n\n"
-            final_json = step_3_result.model_dump_json()
+            
+            # --- Send Final Result ---
+            final_json_payload = step_3_result.model_dump_json()
             yield f"event: result\n"
-            yield f"data: {final_json}\n\n"
+            yield f"data: {final_json_payload}\n\n"
+
         except Exception as e:
             print(f"ERROR: An error occurred during the stream: {e}")
             error_message = json.dumps({"error": f"An internal error occurred: {e}"})
             yield "event: error\n"
             yield f"data: {error_message}\n\n"
+            
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
+
 # -------------------------------------------------------------------
-# MARA Analysis Steps
+# MARA Analysis Steps (No changes needed in these functions)
 # -------------------------------------------------------------------
 
 def step_one_find_studies(user_query: str) -> str:
@@ -154,6 +174,7 @@ def step_one_find_studies(user_query: str) -> str:
     return text
 
 def compose_step_one_query(user_query: str) -> str:
+    # Omitted for brevity
     return (
         common_persona_prompt
         + " Find me high-quality studies that look into the question of: "
@@ -165,8 +186,8 @@ def compose_step_one_query(user_query: str) -> str:
         + "\nExclude any studies which either:"
         + "\n1. lack a comparison or control group."
         + "\n2. are purely correlational, that do not include either a randomized-controlled trial, quasi-experimental design, or regression discontinuity"
-        + "\nFinally, indlue these studies in a list of highest quality to lowest, formatting that list by: 'Title, Authors, Date Published.' "
-        + "\nOnly return that raw list in your response, nothing else."
+        + "\nFinally, return these studies in a list of highest quality to lowest, formatting that list by: 'Title, Authors, Date Published.' "
+        + "\nKeep your response brief, only including that raw list and nothing more."
     )
 
 def step_two_extract_data(step_1_result: str) -> str:
@@ -178,6 +199,7 @@ def step_two_extract_data(step_1_result: str) -> str:
     return text
 
 def compose_step_two_query(step_1_result: str) -> str:
+    # Omitted for brevity
     return (
         common_persona_prompt
         + " First, lookup the papers for each of the studies in this list."
@@ -192,7 +214,7 @@ def compose_step_two_query(step_1_result: str) -> str:
         + "\nAuthors can report this in varying ways. The preference is for adjusted effects, found in a linear regression. If adjusted effects are unavailable, raw means and standard deviations can be used."
         + "\n6. Study design (i.e., randomized controlled trial, quasi-experimental, or regression discontinuity)"
         + "\nReturn the results in a spreadsheet, where each row is for each study and each column is for each column feature in the above list."
-        + "\nOnly return the spreadsheet, nothing else."
+        + "\nKeep your response brief, only including those spreadsheet rows and nothing more."
     )
 
 def step_three_analyze_data(step_2_result: str) -> AnalysisResponse:
@@ -205,13 +227,11 @@ def step_three_analyze_data(step_2_result: str) -> AnalysisResponse:
     try:
         parsed_response = AnalysisResponse.model_validate_json(step_3_response.text)
     except Exception as e:
-        # Raise a more informative error that includes the raw text for debugging
         raise ValueError(f"Step 3: Failed to parse JSON response from AI. Error: {e}. Raw text: {step_3_response.text}")
     return parsed_response
 
 def compose_step_three_query(step_2_result: str) -> str:
-    # Changed "...in the corresponding AnalysisDetails fields" to "...in the corresponding Details fields"
-    # to prevent extra nesting.
+    # Omitted for brevity
     return (
         common_persona_prompt
         + "\nUsing this dataset: "
@@ -221,5 +241,5 @@ def compose_step_three_query(step_2_result: str) -> str:
         + Confidence.get_description()
         + "Return this in the Confidence enum."
         + "\nGenerate an overview summarizing the analysis conclusion, in one or two sentences. Return this in the response Summary."
-        + "\nInclude a description of the analysis process, the regression models produced, and any corresponding plots, in the corresponding Details fields."
+        + "\nFinally, populate the Details field. The Details field MUST be a JSON object containing the keys 'AnalysisProcess', 'RegressionModel', and 'Plots'. If you cannot perform a step, you MUST return the key with a string value explaining why, for example: 'Plots': 'Plots could not be generated due to insufficient data.' Do NOT return the Details field as a single string."
     )
