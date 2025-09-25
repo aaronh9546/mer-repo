@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
 import google.generativeai as genai
 import os
@@ -22,22 +22,19 @@ model = genai.GenerativeModel(gemini_model_name)
 
 common_persona_prompt = "You are a senior data analyst with a specialty in meta-analysis."
 
-# ▼▼▼ NEW AUTHENTICATION CODE ▼▼▼
-# Secrets from environment variables on Render
+# --- Authentication Code ---
 CML_SHARED_SECRET_KEY = os.getenv("CML_SHARED_SECRET_KEY")
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
 if not CML_SHARED_SECRET_KEY or not JWT_SECRET_KEY:
     raise RuntimeError("CML_SHARED_SECRET_KEY and JWT_SECRET_KEY must be set in your Render environment.")
 
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7 # 7-day token validity
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7
 
-# Dependency to check the internal secret sent by WordPress
 async def verify_internal_secret(x_internal_secret: str = Header(None)):
     if not x_internal_secret or x_internal_secret != CML_SHARED_SECRET_KEY:
         raise HTTPException(status_code=403, detail="Invalid or missing internal secret")
 
-# Pydantic models for authentication data
 class WordPressUser(BaseModel):
     id: int
     email: str
@@ -46,8 +43,6 @@ class WordPressUser(BaseModel):
 class Token(BaseModel):
     access_token: str
     token_type: str
-# ▲▲▲ END NEW AUTHENTICATION CODE ▲▲▲
-
 
 app = FastAPI()
 
@@ -58,7 +53,6 @@ origins = [
     "https://aaronhanto-nyozw.wpcomstaging.com",
     "http://localhost:3000",
 ]
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -83,35 +77,27 @@ class Confidence(str, enum.Enum):
             + "\nRED - The topic has a study that would have qualified for “green” or “yellow” but did not because it failed to account for clustering (but did obtain significantly positive outcomes at the student level) or did not meet the sample size requirements. Post-hoc or retrospective studies may also qualify. Correlational studies (e.g., studies that can show a relationship between the intervention and outcome but cannot show causation) have found that the intervention likely improves a relevant student outcome (e.g., reading scores, attendance rates). The studies do not have to be based on large, multi-site samples. No other experimental or quasiexperimental research shows that the intervention negatively affects the outcome."
         )
 
+# Use Field(alias='...') to map the AI's capitalized keys to our lowercase variables.
 class AnalysisDetails(BaseModel):
-    regression_models: str
-    process: str
-    plots: str
+    regression_models: str = Field(alias="RegressionModel")
+    process: str = Field(alias="AnalysisProcess")
+    plots: str = Field(alias="Plots")
 
 class AnalysisResponse(BaseModel):
-    summary: str
-    confidence: Confidence
-    details: AnalysisDetails
+    summary: str = Field(alias="Summary")
+    confidence: Confidence = Field(alias="Confidence")
+    details: AnalysisDetails = Field(alias="Details")
 
-
-# ▼▼▼ NEW AUTHENTICATION ENDPOINT ▼▼▼
+# --- Authentication Endpoint ---
 @app.post("/auth/issue-wordpress-token", response_model=Token, dependencies=[Depends(verify_internal_secret)])
 async def issue_wordpress_token(user: WordPressUser):
-    """
-    Called by the WordPress server to issue a JWT for a verified user.
-    This endpoint is protected by the shared secret key dependency.
-    """
     expires_delta = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     expire = datetime.now(timezone.utc) + expires_delta
     to_encode = {"sub": str(user.id), "exp": expire}
-    
     encoded_jwt = jwt.encode(to_encode, JWT_SECRET_KEY, algorithm=ALGORITHM)
-    
     return {"access_token": encoded_jwt, "token_type": "bearer"}
-# ▲▲▲ END NEW AUTHENTICATION ENDPOINT ▲▲▲
 
-
-# --- Helper Function for Text Extraction (Steps 1 & 2) ---
+# --- Helper Function ---
 def extract_text(response):
     try:
         if response and hasattr(response, 'text'): return response.text
@@ -125,29 +111,26 @@ def extract_text(response):
 @app.post("/chat")
 async def chat_api(query: Query):
     user_query = query.message
-    if not user_query:
-        raise HTTPException(status_code=400, detail="Query message is required.")
-
+    if not user_query: raise HTTPException(status_code=400, detail="Query message is required.")
     async def event_generator():
         try:
             print(f"LOG: Starting investigation for query: '{user_query}'")
             yield "data: Finding relevant studies...\n\n"
             step_1_result = step_one_find_studies(user_query)
-            print("LOG: Step 1 complete. Found studies list.")
+            print("LOG: Step 1 complete.")
             yield "data: Found relevant studies.\n\n"
             await asyncio.sleep(0.1)
-            print("LOG: Starting Step 2 - Extracting data from studies.")
+            print("LOG: Starting Step 2.")
             yield "data: Extracting study data...\n\n"
             step_2_result = step_two_extract_data(step_1_result)
-            print("LOG: Step 2 complete. Extracted study data.")
+            print("LOG: Step 2 complete.")
             yield "data: Extracted study data.\n\n"
             await asyncio.sleep(0.1)
-            print("LOG: Starting Step 3 - Analyzing data.")
+            print("LOG: Starting Step 3.")
             yield "data: Analyzing study data...\n\n"
             step_3_result = step_three_analyze_data(step_2_result)
-            print("LOG: Step 3 complete. Analysis finished.")
+            print("LOG: Step 3 complete.")
             yield "data: Analyzed study data.\n\n"
-            print("LOG: Sending final analysis response to client.")
             final_json = step_3_result.model_dump_json()
             yield f"event: result\n"
             yield f"data: {final_json}\n\n"
@@ -220,18 +203,15 @@ def step_three_analyze_data(step_2_result: str) -> AnalysisResponse:
         generation_config={"response_mime_type": "application/json"},
     )
     try:
-        # Pydantic v2 uses model_validate_json for robust parsing from a string
         parsed_response = AnalysisResponse.model_validate_json(step_3_response.text)
-    except (json.JSONDecodeError, ValueError) as e:
+    except Exception as e:
+        # Raise a more informative error that includes the raw text for debugging
         raise ValueError(f"Step 3: Failed to parse JSON response from AI. Error: {e}. Raw text: {step_3_response.text}")
-    
-    if not parsed_response:
-        raise ValueError(f"Step 3: Failed to get a valid parsed JSON response. Raw text: {step_3_response.text}")
-        
     return parsed_response
 
 def compose_step_three_query(step_2_result: str) -> str:
-    # We can omit the full text here for brevity in the final file
+    # Changed "...in the corresponding AnalysisDetails fields" to "...in the corresponding Details fields"
+    # to prevent extra nesting.
     return (
         common_persona_prompt
         + "\nUsing this dataset: "
@@ -241,5 +221,5 @@ def compose_step_three_query(step_2_result: str) -> str:
         + Confidence.get_description()
         + "Return this in the Confidence enum."
         + "\nGenerate an overview summarizing the analysis conclusion, in one or two sentences. Return this in the response Summary."
-        + "\nInclude all other details in the response Details, making sure to include a description of the analysis process used, the regression models produced, and any correpsonding plots, in the corresponding AnalysisDetails fields."
+        + "\nInclude a description of the analysis process, the regression models produced, and any corresponding plots, in the corresponding Details fields."
     )
