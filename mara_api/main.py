@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,20 +7,47 @@ import os
 import enum
 import json
 import asyncio
+from jose import JWTError, jwt
+from datetime import datetime, timedelta, timezone
 
 # --- Environment Variable & API Client Setup ---
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
     raise RuntimeError("GEMINI_API_KEY environment variable not set.")
 
-# --- FIX 1: Configure the API key directly ---
 genai.configure(api_key=GEMINI_API_KEY)
 
 gemini_model_name = "gemini-1.5-pro-latest"
-# --- FIX 2: Create a reusable GenerativeModel instance ---
 model = genai.GenerativeModel(gemini_model_name)
 
 common_persona_prompt = "You are a senior data analyst with a specialty in meta-analysis."
+
+# ▼▼▼ NEW AUTHENTICATION CODE ▼▼▼
+# Secrets from environment variables on Render
+CML_SHARED_SECRET_KEY = os.getenv("CML_SHARED_SECRET_KEY")
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
+if not CML_SHARED_SECRET_KEY or not JWT_SECRET_KEY:
+    raise RuntimeError("CML_SHARED_SECRET_KEY and JWT_SECRET_KEY must be set in your Render environment.")
+
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7 # 7-day token validity
+
+# Dependency to check the internal secret sent by WordPress
+async def verify_internal_secret(x_internal_secret: str = Header(None)):
+    if not x_internal_secret or x_internal_secret != CML_SHARED_SECRET_KEY:
+        raise HTTPException(status_code=403, detail="Invalid or missing internal secret")
+
+# Pydantic models for authentication data
+class WordPressUser(BaseModel):
+    id: int
+    email: str
+    name: str
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+# ▲▲▲ END NEW AUTHENTICATION CODE ▲▲▲
+
 
 app = FastAPI()
 
@@ -40,7 +67,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Pydantic Schemas for API Input and Output ---
+# --- Pydantic Schemas for Chat API ---
 class Query(BaseModel):
     message: str
 
@@ -48,7 +75,6 @@ class Confidence(str, enum.Enum):
     GREEN = "GREEN"
     YELLOW = "YELLOW"
     RED = "RED"
-    
     @staticmethod
     def get_description():
         return (
@@ -67,21 +93,35 @@ class AnalysisResponse(BaseModel):
     confidence: Confidence
     details: AnalysisDetails
 
+
+# ▼▼▼ NEW AUTHENTICATION ENDPOINT ▼▼▼
+@app.post("/auth/issue-wordpress-token", response_model=Token, dependencies=[Depends(verify_internal_secret)])
+async def issue_wordpress_token(user: WordPressUser):
+    """
+    Called by the WordPress server to issue a JWT for a verified user.
+    This endpoint is protected by the shared secret key dependency.
+    """
+    expires_delta = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    expire = datetime.now(timezone.utc) + expires_delta
+    to_encode = {"sub": str(user.id), "exp": expire}
+    
+    encoded_jwt = jwt.encode(to_encode, JWT_SECRET_KEY, algorithm=ALGORITHM)
+    
+    return {"access_token": encoded_jwt, "token_type": "bearer"}
+# ▲▲▲ END NEW AUTHENTICATION ENDPOINT ▲▲▲
+
+
 # --- Helper Function for Text Extraction (Steps 1 & 2) ---
 def extract_text(response):
-    """Safely extract text from a Gemini response object."""
     try:
-        if response and hasattr(response, 'text'):
-            return response.text
+        if response and hasattr(response, 'text'): return response.text
         if response and hasattr(response, "candidates") and response.candidates:
-            candidate = response.candidates[0]
-            if hasattr(candidate, "content") and candidate.content.parts:
-                return candidate.content.parts[0].text
+            return response.candidates[0].content.parts[0].text
     except (AttributeError, IndexError) as e:
         print(f"⚠️ Error during text extraction: {e}. Raw response: {response}")
     return None
 
-# --- Main API Endpoint (Updated for Streaming) ---
+# --- Main Chat API Endpoint ---
 @app.post("/chat")
 async def chat_api(query: Query):
     user_query = query.message
@@ -89,46 +129,33 @@ async def chat_api(query: Query):
         raise HTTPException(status_code=400, detail="Query message is required.")
 
     async def event_generator():
-        """This is the generator that yields updates to the client."""
         try:
-            # --- Step 1: Find Studies ---
             print(f"LOG: Starting investigation for query: '{user_query}'")
             yield "data: Finding relevant studies...\n\n"
             step_1_result = step_one_find_studies(user_query)
             print("LOG: Step 1 complete. Found studies list.")
             yield "data: Found relevant studies.\n\n"
-            
             await asyncio.sleep(0.1)
-
-            # --- Step 2: Extract Data ---
             print("LOG: Starting Step 2 - Extracting data from studies.")
             yield "data: Extracting study data...\n\n"
             step_2_result = step_two_extract_data(step_1_result)
             print("LOG: Step 2 complete. Extracted study data.")
             yield "data: Extracted study data.\n\n"
-            
             await asyncio.sleep(0.1)
-
-            # --- Step 3: Analyze Data ---
             print("LOG: Starting Step 3 - Analyzing data.")
             yield "data: Analyzing study data...\n\n"
             step_3_result = step_three_analyze_data(step_2_result)
             print("LOG: Step 3 complete. Analysis finished.")
             yield "data: Analyzed study data.\n\n"
-
-            # --- Send Final Result ---
             print("LOG: Sending final analysis response to client.")
             final_json = step_3_result.model_dump_json()
             yield f"event: result\n"
             yield f"data: {final_json}\n\n"
-
         except Exception as e:
-            # --- Handle Errors in the Stream ---
             print(f"ERROR: An error occurred during the stream: {e}")
             error_message = json.dumps({"error": f"An internal error occurred: {e}"})
             yield "event: error\n"
             yield f"data: {error_message}\n\n"
-            
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 # -------------------------------------------------------------------
@@ -136,14 +163,11 @@ async def chat_api(query: Query):
 # -------------------------------------------------------------------
 
 def step_one_find_studies(user_query: str) -> str:
-    if not user_query:
-        raise ValueError("Step 1: user_query cannot be empty.")
+    if not user_query: raise ValueError("Step 1: user_query cannot be empty.")
     step_1_query = compose_step_one_query(user_query)
-    # --- FIX 3: Use the 'model' object to generate content ---
     step_1_response = model.generate_content(contents=step_1_query)
     text = extract_text(step_1_response)
-    if not text:
-        raise ValueError("Step 1: Failed to get a valid text response from the API.")
+    if not text: raise ValueError("Step 1: Failed to get a valid text response from the API.")
     return text
 
 def compose_step_one_query(user_query: str) -> str:
@@ -163,14 +187,11 @@ def compose_step_one_query(user_query: str) -> str:
     )
 
 def step_two_extract_data(step_1_result: str) -> str:
-    if not step_1_result:
-        raise ValueError("Step 2: Input from step 1 cannot be empty.")
+    if not step_1_result: raise ValueError("Step 2: Input from step 1 cannot be empty.")
     step_2_query = compose_step_two_query(step_1_result)
-    # --- FIX 3: Use the 'model' object to generate content ---
     step_2_response = model.generate_content(contents=step_2_query)
     text = extract_text(step_2_response)
-    if not text:
-        raise ValueError("Step 2: Failed to get a valid text response from the API.")
+    if not text: raise ValueError("Step 2: Failed to get a valid text response from the API.")
     return text
 
 def compose_step_two_query(step_1_result: str) -> str:
@@ -192,22 +213,25 @@ def compose_step_two_query(step_1_result: str) -> str:
     )
 
 def step_three_analyze_data(step_2_result: str) -> AnalysisResponse:
-    if not step_2_result:
-        raise ValueError("Step 3: Input from step 2 cannot be empty.")
+    if not step_2_result: raise ValueError("Step 3: Input from step 2 cannot be empty.")
     step_3_query = compose_step_three_query(step_2_result)
-    # --- FIX 3: Use the 'model' object to generate content ---
     step_3_response = model.generate_content(
         contents=step_3_query,
         generation_config={"response_mime_type": "application/json"},
-        request_options={"response_schema": AnalysisResponse},
     )
-    # Note: The response object for JSON is slightly different
-    parsed_response = AnalysisResponse.model_validate_json(step_3_response.text)
+    try:
+        # Pydantic v2 uses model_validate_json for robust parsing from a string
+        parsed_response = AnalysisResponse.model_validate_json(step_3_response.text)
+    except (json.JSONDecodeError, ValueError) as e:
+        raise ValueError(f"Step 3: Failed to parse JSON response from AI. Error: {e}. Raw text: {step_3_response.text}")
+    
     if not parsed_response:
-        raise ValueError(f"Step 3: Failed to get a valid parsed JSON response from the API. Raw response: {step_3_response.text}")
+        raise ValueError(f"Step 3: Failed to get a valid parsed JSON response. Raw text: {step_3_response.text}")
+        
     return parsed_response
 
 def compose_step_three_query(step_2_result: str) -> str:
+    # We can omit the full text here for brevity in the final file
     return (
         common_persona_prompt
         + "\nUsing this dataset: "
