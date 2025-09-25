@@ -1,57 +1,100 @@
-from fastapi import FastAPI, HTTPException, Depends, Header
+from fastapi import FastAPI, HTTPException, Depends, Security
+from fastapi.security import OAuth2PasswordBearer, APIKeyHeader
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ValidationError
 from fastapi.middleware.cors import CORSMiddleware
 import google.generativeai as genai
 import os
 import enum
 import json
 import asyncio
-from jose import JWTError, jwt
+import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Union
+from jose import JWTError, jwt
 
-# --- Environment Variable & API Client Setup ---
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-if not GEMINI_API_KEY:
-    raise RuntimeError("GEMINI_API_KEY environment variable not set.")
+# --- Security and Authentication Setup ---
 
-genai.configure(api_key=GEMINI_API_KEY)
-
-gemini_model_name = "gemini-1.5-pro-latest"
-model = genai.GenerativeModel(gemini_model_name)
-
-common_persona_prompt = "You are a senior data analyst with a specialty in meta-analysis."
-
-# --- Authentication Code ---
-CML_SHARED_SECRET_KEY = os.getenv("CML_SHARED_SECRET_KEY")
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
-if not CML_SHARED_SECRET_KEY or not JWT_SECRET_KEY:
-    raise RuntimeError("CML_SHARED_SECRET_KEY and JWT_SECRET_KEY must be set in your Render environment.")
-
+INTERNAL_SECRET_KEY = os.getenv("INTERNAL_SECRET_KEY", "YOUR_SUPER_SECRET_PRE_SHARED_KEY")
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "a_different_strong_secret_for_jwt")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7 # 1 week expiration for tokens
 
-async def verify_internal_secret(x_internal_secret: str = Header(None)):
-    if not x_internal_secret or x_internal_secret != CML_SHARED_SECRET_KEY:
-        raise HTTPException(status_code=403, detail="Invalid or missing internal secret")
+class TokenData(BaseModel):
+    user_id: int | None = None
 
-class WordPressUser(BaseModel):
+class User(BaseModel):
     id: int
     email: str
-    name: str
+    name: str | None = None
 
-class Token(BaseModel):
-    access_token: str
-    token_type: str
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+api_key_header = APIKeyHeader(name="X-Internal-Secret", auto_error=True)
 
+def create_access_token(data: dict, expires_delta: timedelta | None = None):
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.now(timezone.utc) + expires_delta
+    else:
+        expire = datetime.now(timezone.utc) + timedelta(minutes=15)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, JWT_SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
+    credentials_exception = HTTPException(
+        status_code=401,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[ALGORITHM])
+        user_id: int = int(payload.get("sub"))
+        email: str = payload.get("email")
+        name: str = payload.get("name")
+        if user_id is None or email is None:
+            raise credentials_exception
+    except (JWTError, ValueError, TypeError):
+        raise credentials_exception
+    
+    user = User(id=user_id, email=email, name=name)
+    return user
+
+async def check_internal_secret(internal_secret: str = Security(api_key_header)):
+    if internal_secret != INTERNAL_SECRET_KEY:
+        raise HTTPException(status_code=403, detail="Invalid secret key for internal communication")
+
+# --- Application Setup ---
+
+chat_sessions = {}
+
+class CustomEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, enum.Enum):
+            return obj.value
+        return super().default(obj)
+
+client = None
+gemini_model = "gemini-1.5-pro"
+common_persona_prompt = "You are a senior data analyst with a specialty in meta-analysis."
 app = FastAPI()
 
-# --- CORS Middleware Setup ---
+@app.on_event("startup")
+async def startup_event():
+    global client
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+    if not GEMINI_API_KEY:
+        raise ValueError("FATAL: GEMINI_API_KEY environment variable not set.")
+    
+    genai.configure(api_key=GEMINI_API_KEY)
+    
+    client = genai.GenerativeModel(gemini_model)
+    
+    print("✅ GenAI Client configured and initialized successfully.")
+
 origins = [
     "https://myeducationresearcher.com",
     "https://timothy-han.com",
-    "https://aaronhanto-nyozw.wpcomstaging.com",
+    "https://jsdean1517-pdkfw.wpcomstaging.com",
     "http://localhost:3000",
 ]
 app.add_middleware(
@@ -62,184 +105,268 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Pydantic Schemas for Chat API ---
+# --- Schema (Pydantic Models) ---
 class Query(BaseModel):
     message: str
 
-class Confidence(str, enum.Enum):
+class FollowupQuery(BaseModel):
+    conversation_id: str
+    message: str
+
+class Confidence(enum.Enum):
     GREEN = "GREEN"
     YELLOW = "YELLOW"
     RED = "RED"
+    
     @staticmethod
     def get_description():
-        return ("...") # Omitted for brevity
+        return (
+            "GREEN - If the research on the topic has a well-conducted, randomized study showing a statistically significant positive effect on at least one outcome measure (e.g., state test or national standardized test) analyzed at the proper level of clustering (class/school or student) with a multi-site sample of at least 350 participants. Strong evidence from at least one well-designed and wellimplemented experimental study."
+            + "\nYELLOW - If it meets all standards for “green” stated above, except that instead of using a randomized design, qualifying studies are prospective quasi-experiments (i.e., matched studies). Quasiexperimental studies (e.g., Regression Discontinuity Design) are those in which students have not been randomly assigned to treatment or control groups, but researchers are using statistical matching methods that allow them to speak with confidence about the likelihood that an intervention causes an outcome."
+            + "\nRED - The topic has a study that would have qualified for “green” or “yellow” but did not because it failed to account for clustering (but did obtain significantly positive outcomes at the student level) or did not meet the sample size requirements. Post-hoc or retrospective studies may also qualify."
+        )
 
 class AnalysisDetails(BaseModel):
-    regression_models: str = Field(alias="RegressionModel")
-    process: str = Field(alias="AnalysisProcess")
-    plots: str = Field(alias="Plots")
+    regression_models: str
+    process: str
+    plots: str
 
 class AnalysisResponse(BaseModel):
-    summary: str = Field(alias="Summary")
-    confidence: Confidence = Field(alias="Confidence")
-    details: Union[AnalysisDetails, str] = Field(alias="Details")
+    summary: str
+    confidence: Confidence
+    details: AnalysisDetails
 
-# --- Authentication Endpoint ---
-@app.post("/auth/issue-wordpress-token", response_model=Token, dependencies=[Depends(verify_internal_secret)])
-async def issue_wordpress_token(user: WordPressUser):
-    expires_delta = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    expire = datetime.now(timezone.utc) + expires_delta
-    to_encode = {"sub": str(user.id), "exp": expire}
-    encoded_jwt = jwt.encode(to_encode, JWT_SECRET_KEY, algorithm=ALGORITHM)
-    return {"access_token": encoded_jwt, "token_type": "bearer"}
+# --- API Endpoints ---
 
-# --- Helper Function ---
-def extract_text(response):
-    try:
-        if response and hasattr(response, 'text'): return response.text
-        if response and hasattr(response, "candidates") and response.candidates:
-            return response.candidates[0].content.parts[0].text
-    except (AttributeError, IndexError) as e:
-        print(f"⚠️ Error during text extraction: {e}. Raw response: {response}")
-    return None
-
-# --- Main Chat API Endpoint ---
-@app.post("/chat")
-async def chat_api(query: Query):
-    user_query = query.message
-    if not user_query: raise HTTPException(status_code=400, detail="Query message is required.")
+@app.post("/auth/issue-wordpress-token", dependencies=[Depends(check_internal_secret)])
+async def issue_wordpress_token(user: User):
+    print(f"Issuing token for WordPress user: {user.email} (ID: {user.id})")
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     
+    access_token = create_access_token(
+        data={"sub": str(user.id), "email": user.email, "name": user.name},
+        expires_delta=access_token_expires,
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
+
+@app.post("/chat")
+async def chat_api(query: Query, current_user: User = Depends(get_current_user)):
+    print(f"Authenticated request from user: {current_user.email}")
+    user_query = query.message
+
     async def event_generator():
+        if not client:
+            error_data = {"type": "error", "content": "Server error: AI client not initialized."}
+            yield f"data: {json.dumps(error_data)}\n\n"
+            return
         try:
-            # Send initial status
-            print(f"LOG: Starting investigation for query: '{user_query}'")
-            yield f"data: {json.dumps('Finding relevant studies...')}\n\n"
+            yield f"data: {json.dumps({'type': 'update', 'content': 'Finding relevant studies...'})}\n\n"
+            step_1_result = await get_studies(user_query)
+            yield f"data: {json.dumps({'type': 'step_result', 'step': 1, 'content': step_1_result})}\n\n"
+
+            yield f"data: {json.dumps({'type': 'update', 'content': 'Extracting study data...'})}\n\n"
+            step_2_result = await extract_studies_data(step_1_result)
+            yield f"data: {json.dumps({'type': 'step_result', 'step': 2, 'content': step_2_result})}\n\n"
+
+            yield f"data: {json.dumps({'type': 'update', 'content': 'Analyzing study data...'})}\n\n"
+            analysis_result = await analyze_studies(step_2_result)
             
-            # --- Step 1: Find Studies ---
-            step_1_result = step_one_find_studies(user_query)
-            print("LOG: Step 1 complete.")
-            # ▼▼▼ MODIFIED BLOCK ▼▼▼
-            # Yield the result of Step 1
-            yield f"event: step1_result\n"
-            yield f"data: {json.dumps(step_1_result)}\n\n"
-            await asyncio.sleep(0.1)
-            # ▲▲▲ END MODIFIED BLOCK ▲▲▲
+            conversation_id = str(uuid.uuid4())
+            chat_sessions[conversation_id] = {
+                "user_id": current_user.id,
+                "original_query": user_query,
+                "studies_list": step_1_result,
+                "studies_data": step_2_result,
+                "analysis": analysis_result.model_dump(),
+                "history": [
+                    {"role": "user", "content": user_query},
+                    {"role": "assistant", "content": analysis_result.summary}
+                ]
+            }
 
-            # Send status for next step
-            print("LOG: Starting Step 2.")
-            yield f"data: {json.dumps('Extracting study data...')}\n\n"
+            result_data = {"type": "result", "content": analysis_result.model_dump()}
+            yield f"data: {json.dumps(result_data, cls=CustomEncoder)}\n\n"
             
-            # --- Step 2: Extract Data ---
-            step_2_result = step_two_extract_data(step_1_result)
-            print("LOG: Step 2 complete.")
-            # ▼▼▼ MODIFIED BLOCK ▼▼▼
-            # Yield the result of Step 2
-            yield f"event: step2_result\n"
-            yield f"data: {json.dumps(step_2_result)}\n\n"
-            await asyncio.sleep(0.1)
-            # ▲▲▲ END MODIFIED BLOCK ▲▲▲
+            yield f"data: {json.dumps({'type': 'conversation_id', 'content': conversation_id})}\n\n"
 
-            # Send status for final step
-            print("LOG: Starting Step 3.")
-            yield f"data: {json.dumps('Analyzing study data...')}\n\n"
-
-            # --- Step 3: Analyze Data ---
-            step_3_result = step_three_analyze_data(step_2_result)
-            print("LOG: Step 3 complete.")
-            
-            # --- Send Final Result ---
-            final_json_payload = step_3_result.model_dump_json()
-            yield f"event: result\n"
-            yield f"data: {final_json_payload}\n\n"
-
+            suggestions_content = (
+                "Analysis complete. Here are some things you can do next:\n"
+                "- Show me a forest plot of the results\n"
+                "- Show me the procedures used\n"
+                "- Show me a list of included citations\n"
+                "- Show me the meta-analytic models\n"
+                "- Ask another question"
+            )
+            yield f"data: {json.dumps({'type': 'update', 'content': suggestions_content})}\n\n"
         except Exception as e:
-            print(f"ERROR: An error occurred during the stream: {e}")
-            error_message = json.dumps({"error": f"An internal error occurred: {e}"})
-            yield "event: error\n"
-            yield f"data: {error_message}\n\n"
-            
+            print(f"An error occurred in the stream: {e}")
+            error_data = {"type": "error", "content": f"An error occurred: {str(e)}"}
+            yield f"data: {json.dumps(error_data)}\n\n"
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
+@app.post("/followup")
+async def followup_api(query: FollowupQuery, current_user: User = Depends(get_current_user)):
+    conversation_id = query.conversation_id
+    session_data = chat_sessions.get(conversation_id)
 
-# -------------------------------------------------------------------
-# MARA Analysis Steps (No changes needed in these functions)
-# -------------------------------------------------------------------
+    if not session_data:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    if session_data.get("user_id") != current_user.id:
+        raise HTTPException(status_code=403, detail="You do not have permission to access this conversation.")
 
-def step_one_find_studies(user_query: str) -> str:
-    if not user_query: raise ValueError("Step 1: user_query cannot be empty.")
+    async def followup_generator():
+        try:
+            yield f"data: {json.dumps({'type': 'update', 'content': 'Analyzing followup...'})}\n\n"
+            
+            followup_prompt = compose_followup_query(session_data, query.message)
+            
+            response_stream = await client.generate_content_async(followup_prompt, stream=True)
+            
+            full_response = ""
+            async for chunk in response_stream:
+                if chunk.text:
+                    full_response += chunk.text
+                    yield f"data: {json.dumps({'type': 'message', 'content': chunk.text})}\n\n"
+            
+            session_data["history"].append({"role": "user", "content": query.message})
+            session_data["history"].append({"role": "assistant", "content": full_response})
+            chat_sessions[conversation_id] = session_data
+
+        except Exception as e:
+            print(f"An error occurred in the followup stream: {e}")
+            error_data = {"type": "error", "content": f"An error occurred: {str(e)}"}
+            yield f"data: {json.dumps(error_data)}\n\n"
+
+    return StreamingResponse(followup_generator(), media_type="text/event-stream")
+
+# --- MARA Logic and Prompt Composition ---
+
+def compose_followup_query(session_data: dict, new_message: str) -> str:
+    history_summary = "\n".join([f"{msg['role']}: {msg['content']}" for msg in session_data.get("history", [])])
+    
+    return (
+        f"{common_persona_prompt}\n"
+        f"You are continuing a conversation with a user. Below is the context from their original query and the chat history so far.\n\n"
+        f"--- Original Context ---\n"
+        f"Original Question: {session_data['original_query']}\n"
+        f"Analysis Summary: {session_data['analysis']['summary']}\n"
+        f"--- End Original Context ---\n\n"
+        f"--- Conversation History ---\n"
+        f"{history_summary}\n"
+        f"--- End History ---\n\n"
+        f"Now, please answer the user's latest message based on all the information provided.\n"
+        f"User's new message: \"{new_message}\""
+    )
+
+async def get_studies(user_query: str) -> str:
+    if not user_query:
+        raise ValueError("Step 1: user_query is empty.")
+    
     step_1_query = compose_step_one_query(user_query)
-    step_1_response = model.generate_content(contents=step_1_query)
-    text = extract_text(step_1_response)
-    if not text: raise ValueError("Step 1: Failed to get a valid text response from the API.")
-    return text
+    response = await client.generate_content_async(step_1_query)
+    
+    if not response.text:
+        raise ValueError("Step 1: No response from Gemini.")
+        
+    return response.text
 
 def compose_step_one_query(user_query: str) -> str:
-    # Omitted for brevity
     return (
         common_persona_prompt
-        + " Find me high-quality studies that look into the question of: "
-        + user_query
-        + "\nPlease optimize your search per the following constraints: "
+        + " Find me high-quality studies that look into the question of: " + user_query
+        + "\nOptimize your search per the following constraints: "
         + "\n1. Search online databases that index published literature, as well as sources such as Google Scholar."
         + "\n2. Find studies per retrospective reference harvesting and prospective forward citation searching."
         + "\n3. Attempt to identify unpublished literature such as dissertations and reports from independent research firms."
         + "\nExclude any studies which either:"
-        + "\n1. lack a comparison or control group."
+        + "\n1. lack a comparison or control group,"
         + "\n2. are purely correlational, that do not include either a randomized-controlled trial, quasi-experimental design, or regression discontinuity"
         + "\nFinally, return these studies in a list of highest quality to lowest, formatting that list by: 'Title, Authors, Date Published.' "
-        + "\nKeep your response brief, only including that raw list and nothing more."
+        + "\nInclude at least 30 studies, or if fewer than 30 the max available."
+        + "\nDo not add any explanatory text."
     )
 
-def step_two_extract_data(step_1_result: str) -> str:
-    if not step_1_result: raise ValueError("Step 2: Input from step 1 cannot be empty.")
+async def extract_studies_data(step_1_result: str) -> str:
+    if not step_1_result:
+        raise ValueError("Step 2: step_1_result is empty.")
     step_2_query = compose_step_two_query(step_1_result)
-    step_2_response = model.generate_content(contents=step_2_query)
-    text = extract_text(step_2_response)
-    if not text: raise ValueError("Step 2: Failed to get a valid text response from the API.")
-    return text
+    response = await client.generate_content_async(step_2_query)
+    if not response.text:
+        raise ValueError("Step 2: No response from Gemini.")
+    return response.text
 
 def compose_step_two_query(step_1_result: str) -> str:
-    # Omitted for brevity
     return (
         common_persona_prompt
-        + " First, lookup the papers for each of the studies in this list."
-        + "\n"
-        + step_1_result
-        + "\n Then, extract the following data to compile into a spreadsheet."
-        + "\nSpecifically, organize the data for each study into the following columns: "
+        + " For each study in this list, look up the paper:\n" + step_1_result
+        + "\nThen, extract the following data into a spreadsheet format: "
         + "\n1. Sample size of treatment and comparison groups"
-        + "\n2. Cluster sample sizes (i.e. size of the classroom or school of however the individuals are clustered)"
-        + "\n3. Intraclass correlation coefficient (ICC; when available) will be coded for cluster studies. When the ICC estimates are not provided, impute a constant value of 0.20."
-        + "\n4. Effect size for each outcome analysis will be calculated and recorded. These should be the standardized mean difference between the treatment and control group at post-test, ideally adjusted for pre-test differences."
-        + "\nAuthors can report this in varying ways. The preference is for adjusted effects, found in a linear regression. If adjusted effects are unavailable, raw means and standard deviations can be used."
-        + "\n6. Study design (i.e., randomized controlled trial, quasi-experimental, or regression discontinuity)"
-        + "\nReturn the results in a spreadsheet, where each row is for each study and each column is for each column feature in the above list."
-        + "\nKeep your response brief, only including those spreadsheet rows and nothing more."
+        + "\n2. Cluster sample sizes (i.e. size of classroom/school)"
+        + "\n3. Intraclass correlation coefficient (ICC). If not provided, impute 0.20."
+        + "\n4. Effect size for each outcome (standardized mean difference, adjusted for pre-test if possible)."
+        + "\n5. Study design (RCT, quasi-experimental, or RDD)."
+        + "\nReturn only the spreadsheet data and nothing else."
     )
 
-def step_three_analyze_data(step_2_result: str) -> AnalysisResponse:
-    if not step_2_result: raise ValueError("Step 3: Input from step 2 cannot be empty.")
-    step_3_query = compose_step_three_query(step_2_result)
-    step_3_response = model.generate_content(
-        contents=step_3_query,
-        generation_config={"response_mime_type": "application/json"},
+async def analyze_studies(step_2_result: str, max_retries: int = 2) -> AnalysisResponse:
+    if not step_2_result:
+        raise ValueError("Step 3: step_2_result is empty.")
+
+    original_prompt = compose_step_three_query(step_2_result)
+    current_prompt = original_prompt
+    
+    generation_config = genai.types.GenerationConfig(
+        response_mime_type="application/json",
+        response_schema=AnalysisResponse,
     )
-    try:
-        parsed_response = AnalysisResponse.model_validate_json(step_3_response.text)
-    except Exception as e:
-        raise ValueError(f"Step 3: Failed to parse JSON response from AI. Error: {e}. Raw text: {step_3_response.text}")
-    return parsed_response
+    
+    last_error = None
+    
+    for attempt in range(max_retries + 1):
+        try:
+            print(f"--- Step 3: Analysis, Attempt {attempt + 1}/{max_retries + 1} ---")
+            response = await client.generate_content_async(current_prompt, generation_config=generation_config)
+            
+            print(f"🔎 Raw Response (Attempt {attempt + 1}): {response.text}")
+            parsed_response = AnalysisResponse.model_validate_json(response.text)
+            
+            print("✅ Successfully parsed valid JSON from Gemini.")
+            return parsed_response
+
+        except (ValidationError, json.JSONDecodeError) as e:
+            print(f"🔴 Attempt {attempt + 1} failed due to invalid JSON. Error: {e}")
+            last_error = e
+            
+            if attempt < max_retries:
+                print("Retrying with a correction prompt...")
+                # Create a new prompt telling the model what it did wrong
+                current_prompt = (
+                    f"Your previous JSON response was invalid and failed validation with this error: '{str(e)}'.\n"
+                    f"The invalid JSON you provided was: {response.text if 'response' in locals() else 'N/A'}\n"
+                    f"You MUST fix the JSON to strictly match the required schema. Ensure there is a top-level 'summary', 'confidence', and a nested 'details' object which itself contains 'process', 'regression_models', and 'plots'.\n"
+                    f"Now, regenerate the entire, corrected JSON response based on the original request:\n\n"
+                    f"{original_prompt}"
+                )
+        except Exception as e:
+            # Catch any other unexpected errors from the API
+            print(f"🔴 An unexpected error occurred in attempt {attempt + 1}: {e}")
+            last_error = e
+            if attempt >= max_retries:
+                raise ValueError(f"Step 3 failed after {max_retries + 1} attempts. Last error: {last_error}")
+
+    # If the loop finishes without returning, it means all retries failed.
+    raise ValueError(f"Step 3 failed after {max_retries + 1} attempts. Last error: {last_error}")
 
 def compose_step_three_query(step_2_result: str) -> str:
-    # Omitted for brevity
     return (
         common_persona_prompt
-        + "\nUsing this dataset: "
-        + step_2_result
-        + "\ncreate a simple model with only the impact of the main predictor of interest. Specifically, use a multivariate meta-regression model to conduct the meta-analysis."
-        + "\nDetermine the Confidence level per the following criteria: "
-        + Confidence.get_description()
-        + "Return this in the Confidence enum."
-        + "\nGenerate an overview summarizing the analysis conclusion, in one or two sentences. Return this in the response Summary."
-        + "\nFinally, populate the Details field. The Details field MUST be a JSON object containing the keys 'AnalysisProcess', 'RegressionModel', and 'Plots'. If you cannot perform a step, you MUST return the key with a string value explaining why, for example: 'Plots': 'Plots could not be generated due to insufficient data.' Do NOT return the Details field as a single string."
+        + "\nUsing this dataset: " + step_2_result
+        + "\nIMPORTANT: You must return a valid JSON object that strictly adheres to the provided schema."
+        + "\n1. Perform a meta-analysis using a multivariate meta-regression model."
+        + "\n2. Determine the 'confidence' level (GREEN, YELLOW, or RED) based on these criteria: " + Confidence.get_description()
+        + "\n3. Write a one or two sentence 'summary' of the conclusion."
+        + "\n4. The JSON output MUST include a 'details' object. Inside this 'details' object, you MUST provide:"
+        + "\n   - A 'process' field describing the analysis process."
+        + "\n   - A 'regression_models' field showing the regression models produced."
+        + "\n   - A 'plots' field describing any corresponding plots."
     )
