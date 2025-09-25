@@ -74,7 +74,7 @@ class CustomEncoder(json.JSONEncoder):
         return super().default(obj)
 
 client = None
-gemini_model = "gemini-1.5-pro"
+gemini_model = "gemini-2.5-pro"
 common_persona_prompt = "You are a senior data analyst with a specialty in meta-analysis."
 app = FastAPI()
 
