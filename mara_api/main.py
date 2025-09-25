@@ -165,8 +165,8 @@ def compose_step_one_query(user_query: str) -> str:
         + "\nExclude any studies which either:"
         + "\n1. lack a comparison or control group."
         + "\n2. are purely correlational, that do not include either a randomized-controlled trial, quasi-experimental design, or regression discontinuity"
-        + "\nFinally, return these studies in a list of highest quality to lowest, formatting that list by: 'Title, Authors, Date Published.' "
-        + "\nKeep your response brief, only including that raw list and nothing more."
+        + "\nFinally, indlue these studies in a list of highest quality to lowest, formatting that list by: 'Title, Authors, Date Published.' "
+        + "\nOnly return that raw list in your response, nothing else."
     )
 
 def step_two_extract_data(step_1_result: str) -> str:
@@ -192,7 +192,7 @@ def compose_step_two_query(step_1_result: str) -> str:
         + "\nAuthors can report this in varying ways. The preference is for adjusted effects, found in a linear regression. If adjusted effects are unavailable, raw means and standard deviations can be used."
         + "\n6. Study design (i.e., randomized controlled trial, quasi-experimental, or regression discontinuity)"
         + "\nReturn the results in a spreadsheet, where each row is for each study and each column is for each column feature in the above list."
-        + "\nKeep your response brief, only including those spreadsheet rows and nothing more."
+        + "\nOnly return the spreadsheet, nothing else."
     )
 
 def step_three_analyze_data(step_2_result: str) -> AnalysisResponse:
