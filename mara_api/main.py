@@ -18,7 +18,7 @@ app = FastAPI()
 
 # --- CORS Middleware Setup ---
 origins = [
-    "https://aaronhanto-nyozw.com",
+    "https://myeducationresearcher.com",
     "https://timothy-han.com",
     "https://aaronhanto-nyozw.wpcomstaging.com",
     "http://localhost:3000",
