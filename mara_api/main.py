@@ -1,9 +1,12 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse # Used for streaming updates
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 import google.generativeai as genai
 import os
 import enum
+import json # Used to format the final JSON payload in the stream
+import asyncio # Used for non-blocking operations in async functions
 
 # --- Environment Variable & API Client Setup ---
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -11,7 +14,7 @@ if not GEMINI_API_KEY:
     raise RuntimeError("GEMINI_API_KEY environment variable not set.")
 
 client = genai.Client(api_key=GEMINI_API_KEY)
-gemini_model = "gemini-1.5-pro-latest" # Using the latest recommended model
+gemini_model = "gemini-1.5-pro-latest"
 common_persona_prompt = "You are a senior data analyst with a specialty in meta-analysis."
 
 app = FastAPI()
@@ -33,17 +36,14 @@ app.add_middleware(
 )
 
 # --- Pydantic Schemas for API Input and Output ---
-
-# Input schema for the user's initial question
 class Query(BaseModel):
     message: str
 
-# Schemas for the structured JSON response from Step 3
 class Confidence(str, enum.Enum):
     GREEN = "GREEN"
     YELLOW = "YELLOW"
     RED = "RED"
-
+    
     @staticmethod
     def get_description():
         return (
@@ -62,7 +62,6 @@ class AnalysisResponse(BaseModel):
     confidence: Confidence
     details: AnalysisDetails
 
-
 # --- Helper Function for Text Extraction (Steps 1 & 2) ---
 def extract_text(response):
     """Safely extract text from a Gemini response object."""
@@ -77,59 +76,77 @@ def extract_text(response):
         print(f"⚠️ Error during text extraction: {e}. Raw response: {response}")
     return None
 
-
-# --- Main API Endpoint ---
-@app.post("/chat", response_model=AnalysisResponse)
-def chat_api(query: Query):
+# --- Main API Endpoint (Updated for Streaming) ---
+@app.post("/chat")
+async def chat_api(query: Query): # 👈 Changed to async def
     user_query = query.message
     if not user_query:
         raise HTTPException(status_code=400, detail="Query message is required.")
 
-    print("Starting an investigation into:", user_query)
+    async def event_generator():
+        """This is the generator that yields updates to the client."""
+        try:
+            # --- Step 1: Find Studies ---
+            print(f"LOG: Starting investigation for query: '{user_query}'")
+            yield "data: Finding relevant studies...\n\n"
+            step_1_result = step_one_find_studies(user_query)
+            print("LOG: Step 1 complete. Found studies list.")
+            yield "data: Found relevant studies.\n\n"
+            
+            # A small delay to ensure messages are sent and processed
+            await asyncio.sleep(0.1)
 
-    try:
-        # Step 1: Find relevant studies (returns plain text)
-        step_1_result = step_one_find_studies(user_query)
+            # --- Step 2: Extract Data ---
+            print("LOG: Starting Step 2 - Extracting data from studies.")
+            yield "data: Extracting study data...\n\n"
+            step_2_result = step_two_extract_data(step_1_result)
+            print("LOG: Step 2 complete. Extracted study data.")
+            yield "data: Extracted study data.\n\n"
+            
+            await asyncio.sleep(0.1)
 
-        # Step 2: Extract data from studies (returns plain text)
-        step_2_result = step_two_extract_data(step_1_result)
+            # --- Step 3: Analyze Data ---
+            print("LOG: Starting Step 3 - Analyzing data.")
+            yield "data: Analyzing study data...\n\n"
+            step_3_result = step_three_analyze_data(step_2_result)
+            print("LOG: Step 3 complete. Analysis finished.")
+            yield "data: Analyzed study data.\n\n"
 
-        # Step 3: Analyze data and get structured JSON response
-        step_3_result = step_three_analyze_data(step_2_result)
-        
-        print("Investigation complete. Returning structured analysis.")
-        return step_3_result
+            # --- Send Final Result ---
+            print("LOG: Sending final analysis response to client.")
+            final_json = step_3_result.model_dump_json()
+            yield f"event: result\n" # Use a custom event name for the final data
+            yield f"data: {final_json}\n\n"
 
-    except ValueError as ve:
-        print(f"Data processing error: {ve}")
-        raise HTTPException(status_code=500, detail=f"An error occurred during data processing: {ve}")
-    except Exception as e:
-        print(f"An unexpected error occurred: {e}")
-        raise HTTPException(status_code=500, detail=f"An unexpected internal error occurred: {e}")
-
+        except Exception as e:
+            # --- Handle Errors in the Stream ---
+            print(f"ERROR: An error occurred during the stream: {e}")
+            error_message = json.dumps({"error": f"An internal error occurred: {e}"})
+            yield "event: error\n"
+            yield f"data: {error_message}\n\n"
+            
+    # Return the generator in a StreamingResponse
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 # -------------------------------------------------------------------
-# MARA Analysis Steps
+# MARA Analysis Steps (No changes to logic needed)
 # -------------------------------------------------------------------
 
 def step_one_find_studies(user_query: str) -> str:
-    """Finds a list of high-quality studies based on the user's query."""
+    # ... (code is identical to previous version)
     if not user_query:
         raise ValueError("Step 1: user_query cannot be empty.")
-    
-    print("Step 1: Finding relevant studies...")
     step_1_query = compose_step_one_query(user_query)
     step_1_response = client.models.generate_content(
-        model=gemini_model,
-        contents=step_1_query,
+        model=gemini_model, contents=step_1_query,
     )
     text = extract_text(step_1_response)
     if not text:
         raise ValueError("Step 1: Failed to get a valid text response from the API.")
-    print("Step 1: Found studies.")
     return text
 
 def compose_step_one_query(user_query: str) -> str:
+    # ... (code is identical to previous version)
     return (
         common_persona_prompt
         + " Find me high-quality studies that look into the question of: "
@@ -146,23 +163,20 @@ def compose_step_one_query(user_query: str) -> str:
     )
 
 def step_two_extract_data(step_1_result: str) -> str:
-    """Extracts structured data from the list of studies found in step one."""
+    # ... (code is identical to previous version)
     if not step_1_result:
         raise ValueError("Step 2: Input from step 1 cannot be empty.")
-    
-    print("Step 2: Extracting study data...")
     step_2_query = compose_step_two_query(step_1_result)
     step_2_response = client.models.generate_content(
-        model=gemini_model,
-        contents=step_2_query,
+        model=gemini_model, contents=step_2_query,
     )
     text = extract_text(step_2_response)
     if not text:
         raise ValueError("Step 2: Failed to get a valid text response from the API.")
-    print("Step 2: Extracted data.")
     return text
 
 def compose_step_two_query(step_1_result: str) -> str:
+    # ... (code is identical to previous version)
     return (
         common_persona_prompt
         + " First, lookup the papers for each of the studies in this list."
@@ -181,30 +195,30 @@ def compose_step_two_query(step_1_result: str) -> str:
     )
 
 def step_three_analyze_data(step_2_result: str) -> AnalysisResponse:
-    """Performs meta-analysis and returns a structured JSON object."""
+    # ... (code is identical to previous version)
     if not step_2_result:
         raise ValueError("Step 3: Input from step 2 cannot be empty.")
-    
-    print("Step 3: Analyzing data for final report...")
     step_3_query = compose_step_three_query(step_2_result)
     step_3_response = client.models.generate_content(
         model=gemini_model,
         contents=step_3_query,
-        config={
-            "response_mime_type": "application/json",
-            "response_schema": AnalysisResponse,
-        },
+        config={"response_mime_type": "application/json", "response_schema": AnalysisResponse},
     )
     if not step_3_response or not hasattr(step_3_response, 'parsed'):
         raise ValueError(f"Step 3: Failed to get a valid parsed JSON response from the API. Raw response: {step_3_response}")
-    
     parsed_response: AnalysisResponse = step_3_response.parsed
-    print("Step 3: Analysis complete.")
     return parsed_response
 
 def compose_step_three_query(step_2_result: str) -> str:
+    # ... (code is identical to previous version)
     return (
         common_persona_prompt
         + "\nUsing this dataset: "
         + step_2_result
-        + "\ncreate a simple model with only the impact of the main predictor of interest. Specifically
+        + "\ncreate a simple model with only the impact of the main predictor of interest. Specifically, use a multivariate meta-regression model to conduct the meta-analysis."
+        + "\nDetermine the Confidence level per the following criteria: "
+        + Confidence.get_description()
+        + "Return this in the Confidence enum."
+        + "\nGenerate an overview summarizing the analysis conclusion, in one or two sentences. Return this in the response Summary."
+        + "\nInclude all other details in the response Details, making sure to include a description of the analysis process used, the regression models produced, and any correpsonding plots, in the corresponding AnalysisDetails fields."
+    )
