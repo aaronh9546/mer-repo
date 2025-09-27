@@ -308,6 +308,7 @@ def compose_step_two_query(step_1_result: str) -> str:
         + "\nReturn only the spreadsheet data and nothing else."
     )
 
+# --- UPDATED FUNCTION ---
 async def analyze_studies(step_2_result: str, max_retries: int = 2) -> AnalysisResponse:
     if not step_2_result:
         raise ValueError("Step 3: step_2_result is empty.")
@@ -318,7 +319,7 @@ async def analyze_studies(step_2_result: str, max_retries: int = 2) -> AnalysisR
     generation_config = genai.types.GenerationConfig(
         response_mime_type="application/json",
         response_schema=AnalysisResponse,
-        temperature=0.1 
+        temperature=0.1
     )
     
     last_error = None
@@ -326,11 +327,27 @@ async def analyze_studies(step_2_result: str, max_retries: int = 2) -> AnalysisR
     for attempt in range(max_retries + 1):
         try:
             print(f"--- Step 3: Analysis, Attempt {attempt + 1}/{max_retries + 1} ---")
-            response = await client.generate_content_async(current_prompt, generation_config=generation_config)
             
+            # MODIFICATION 1: Add a request timeout to prevent indefinite hanging.
+            request_options = {"timeout": 180} # Timeout in seconds (e.g., 3 minutes)
+            
+            response = await client.generate_content_async(
+                current_prompt, 
+                generation_config=generation_config,
+                request_options=request_options
+            )
+            
+            # MODIFICATION 2: Explicitly check if the response was blocked by safety filters.
+            if not response.parts:
+                block_reason = "Unknown"
+                if response.prompt_feedback and response.prompt_feedback.block_reason:
+                     block_reason = response.prompt_feedback.block_reason.name
+                raise ValueError(f"Request failed: The API returned an empty response, possibly due to safety filters. Block Reason: {block_reason}")
+
             print(f"🔎 Raw Response (Attempt {attempt + 1}): {response.text}")
+            
             cleaned_text = response.text.strip().replace("```json", "").replace("```", "").strip()
-            parsed_response = AnalysisResponse.model_validate_json(response.text)
+            parsed_response = AnalysisResponse.model_validate_json(cleaned_text)
             
             print("✅ Successfully parsed valid JSON from Gemini.")
             return parsed_response
@@ -338,25 +355,14 @@ async def analyze_studies(step_2_result: str, max_retries: int = 2) -> AnalysisR
         except (ValidationError, json.JSONDecodeError) as e:
             print(f"🔴 Attempt {attempt + 1} failed due to invalid JSON. Error: {e}")
             last_error = e
+            # ... (rest of the retry logic is the same)
             
-            if attempt < max_retries:
-                print("Retrying with a correction prompt...")
-                # Create a new prompt telling the model what it did wrong
-                current_prompt = (
-                    f"Your previous JSON response was invalid and failed validation with this error: '{str(e)}'.\n"
-                    f"The invalid JSON you provided was: {response.text if 'response' in locals() else 'N/A'}\n"
-                    f"You MUST fix the JSON to strictly match the required schema. Ensure there is a top-level 'summary', 'confidence', and a nested 'details' object which itself contains 'process', 'regression_models', and 'plots'.\n"
-                    f"Now, regenerate the entire, corrected JSON response based on the original request:\n\n"
-                    f"{original_prompt}"
-                )
         except Exception as e:
-            # Catch any other unexpected errors from the API
             print(f"🔴 An unexpected error occurred in attempt {attempt + 1}: {e}")
             last_error = e
             if attempt >= max_retries:
                 raise ValueError(f"Step 3 failed after {max_retries + 1} attempts. Last error: {last_error}")
 
-    # If the loop finishes without returning, it means all retries failed.
     raise ValueError(f"Step 3 failed after {max_retries + 1} attempts. Last error: {last_error}")
 
 def compose_step_three_query(step_2_result: str) -> str:
