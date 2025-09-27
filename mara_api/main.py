@@ -74,7 +74,7 @@ class CustomEncoder(json.JSONEncoder):
         return super().default(obj)
 
 client = None
-gemini_model = "gemini-1.5-pro" # Note: Changed from 2.5-pro for stability if needed
+gemini_model = "gemini-2.5-pro"
 common_persona_prompt = "You are a senior data analyst with a specialty in meta-analysis."
 app = FastAPI()
 
@@ -308,7 +308,6 @@ def compose_step_two_query(step_1_result: str) -> str:
         + "\nReturn only the spreadsheet data and nothing else."
     )
 
-# --- UPDATED FUNCTION ---
 async def analyze_studies(step_2_result: str, max_retries: int = 2) -> AnalysisResponse:
     if not step_2_result:
         raise ValueError("Step 3: step_2_result is empty.")
@@ -316,11 +315,10 @@ async def analyze_studies(step_2_result: str, max_retries: int = 2) -> AnalysisR
     original_prompt = compose_step_three_query(step_2_result)
     current_prompt = original_prompt
     
-    # MODIFICATION 1: Add temperature to make the output more deterministic
     generation_config = genai.types.GenerationConfig(
         response_mime_type="application/json",
         response_schema=AnalysisResponse,
-        temperature=0.1
+        temperature=0.1 
     )
     
     last_error = None
@@ -331,11 +329,8 @@ async def analyze_studies(step_2_result: str, max_retries: int = 2) -> AnalysisR
             response = await client.generate_content_async(current_prompt, generation_config=generation_config)
             
             print(f"🔎 Raw Response (Attempt {attempt + 1}): {response.text}")
-            
-            # MODIFICATION 2: Clean the response text before parsing
             cleaned_text = response.text.strip().replace("```json", "").replace("```", "").strip()
-            
-            parsed_response = AnalysisResponse.model_validate_json(cleaned_text)
+            parsed_response = AnalysisResponse.model_validate_json(response.text)
             
             print("✅ Successfully parsed valid JSON from Gemini.")
             return parsed_response
@@ -346,23 +341,24 @@ async def analyze_studies(step_2_result: str, max_retries: int = 2) -> AnalysisR
             
             if attempt < max_retries:
                 print("Retrying with a correction prompt...")
+                # Create a new prompt telling the model what it did wrong
                 current_prompt = (
                     f"Your previous JSON response was invalid and failed validation with this error: '{str(e)}'.\n"
                     f"The invalid JSON you provided was: {response.text if 'response' in locals() else 'N/A'}\n"
-                    f"You MUST fix the JSON to strictly match the required schema. Your response must be ONLY the JSON object.\n"
+                    f"You MUST fix the JSON to strictly match the required schema. Ensure there is a top-level 'summary', 'confidence', and a nested 'details' object which itself contains 'process', 'regression_models', and 'plots'.\n"
                     f"Now, regenerate the entire, corrected JSON response based on the original request:\n\n"
                     f"{original_prompt}"
                 )
         except Exception as e:
+            # Catch any other unexpected errors from the API
             print(f"🔴 An unexpected error occurred in attempt {attempt + 1}: {e}")
             last_error = e
             if attempt >= max_retries:
                 raise ValueError(f"Step 3 failed after {max_retries + 1} attempts. Last error: {last_error}")
 
+    # If the loop finishes without returning, it means all retries failed.
     raise ValueError(f"Step 3 failed after {max_retries + 1} attempts. Last error: {last_error}")
 
-
-# --- UPDATED FUNCTION ---
 def compose_step_three_query(step_2_result: str) -> str:
     # By providing a clear JSON structure example, we guide the model to produce the correct output format reliably.
     json_structure_example = """
