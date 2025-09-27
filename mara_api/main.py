@@ -358,15 +358,29 @@ async def analyze_studies(step_2_result: str, max_retries: int = 2) -> AnalysisR
     raise ValueError(f"Step 3 failed after {max_retries + 1} attempts. Last error: {last_error}")
 
 def compose_step_three_query(step_2_result: str) -> str:
+    # By providing a clear JSON structure example, we guide the model to produce the correct output format reliably.
+    json_structure_example = """
+{
+  "summary": "A one or two sentence summary of the analysis conclusion.",
+  "confidence": "GREEN",
+  "details": {
+    "process": "A description of the meta-analysis process used.",
+    "regression_models": "The specific meta-regression models produced, including coefficients and statistics.",
+    "plots": "A textual description of relevant plots, such as a forest plot or funnel plot."
+  }
+}
+"""
+
     return (
         common_persona_prompt
         + "\nUsing this dataset: " + step_2_result
-        + "\nIMPORTANT: You must return a valid JSON object that strictly adheres to the provided schema."
-        + "\n1. Perform a meta-analysis using a multivariate meta-regression model."
-        + "\n2. Determine the 'confidence' level (GREEN, YELLOW, or RED) based on these criteria: " + Confidence.get_description()
-        + "\n3. Write a one or two sentence 'summary' of the conclusion."
-        + "\n4. The JSON output MUST include a 'details' object. Inside this 'details' object, you MUST provide:"
-        + "\n   - A 'process' field describing the analysis process."
-        + "\n   - A 'regression_models' field showing the regression models produced."
-        + "\n   - A 'plots' field describing any corresponding plots."
+        + "\nPerform a meta-analysis using a multivariate meta-regression model and return the results as a valid JSON object."
+        + "\n\n**CRITICAL REQUIREMENT:** Your response MUST be a single, valid JSON object that strictly adheres to the following structure and schema. Do not include any text, markdown formatting, or explanations outside of the JSON object itself."
+        + f"\n\nHere is an example of the required JSON structure:\n```json\n{json_structure_example}\n```"
+        + "\n\nNow, populate this exact JSON structure based on your analysis:"
+        + "\n1. For the `summary` field: Write a one or two sentence summary of your conclusion."
+        + "\n2. For the `confidence` field: Determine the confidence level (GREEN, YELLOW, or RED) based on these criteria: " + Confidence.get_description()
+        + "\n3. For the nested `details.process` field: Describe the analysis process you used."
+        + "\n4. For the nested `details.regression_models` field: Show the regression models produced."
+        + "\n5. For the nested `details.plots` field: Describe any corresponding plots."
     )
