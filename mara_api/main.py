@@ -166,6 +166,10 @@ async def chat_api(query: Query, current_user: User = Depends(get_current_user))
 
             yield f"data: {json.dumps({'type': 'update', 'content': 'Extracting study data...'})}\n\n"
             step_2_result = await extract_studies_data(step_1_result)
+
+            # --- ADDED LINE TO MEASURE DATA SIZE ---
+            print(f"✅ Size of Step 2 Result: {len(step_2_result)} characters")
+
             yield f"data: {json.dumps({'type': 'step_result', 'step': 2, 'content': step_2_result})}\n\n"
 
             yield f"data: {json.dumps({'type': 'update', 'content': 'Analyzing study data...'})}\n\n"
