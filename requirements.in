@@ -1,0 +1,9 @@
+Flask
+Flask-Cors
+pydantic
+python-jose[cryptography]
+google-generativeai
+gunicorn
+sentry-sdk[flask]
+redis
+Flask-Limiter
